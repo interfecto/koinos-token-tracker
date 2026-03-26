@@ -1,0 +1,22 @@
+# Binaries
+*.linux
+*-linux
+koinos-token-tracker
+debug-addr-linux
+
+# Data
+*.db
+*.db-wal
+*.db-shm
+*.csv
+*.txt
+addresses.txt
+balances.csv
+
+# IDE
+.idea/
+.vscode/
+*.swp
+
+# OS
+.DS_Store
