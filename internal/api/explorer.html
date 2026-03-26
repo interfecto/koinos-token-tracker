@@ -381,11 +381,29 @@
     }
 
     @media (max-width: 768px) {
+      html, body { overflow-x: hidden; max-width: 100vw; }
+      .hero { padding: 2.5rem 1rem 2rem; }
+      .hero h1 { font-size: 1.4rem; }
+      .hero-content { padding: 0; }
+      .stats-grid { grid-template-columns: repeat(2, 1fr); gap: 0.5rem; padding: 0 1rem; margin: -1.5rem auto 1rem; }
+      .stat-card { padding: 0.7rem; }
+      .stat-value { font-size: 1.1rem; }
+      .stat-sub { font-size: 0.65rem; }
+      .container { padding: 0 0.8rem 2rem; }
+      .tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; }
+      .tabs::-webkit-scrollbar { display: none; }
+      .tab { padding: 0.6rem 0.8rem; font-size: 0.75rem; white-space: nowrap; }
+      .table-card { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+      table { min-width: 480px; }
+      .address { font-size: 0.65rem; }
+      td, th { padding: 0.4rem 0.5rem; font-size: 0.75rem; }
+      .balance { font-size: 0.75rem; }
+      .search-bar { flex-direction: column; }
+      .search-input { font-size: 0.75rem; }
       .charts-grid { grid-template-columns: 1fr; }
-      .hero h1 { font-size: 1.5rem; }
-      .stats-grid { grid-template-columns: repeat(2, 1fr); }
-      .address { font-size: 0.72rem; }
-      td, th { padding: 0.5rem 0.7rem; }
+      .chart-container { height: 220px; }
+      .detail-grid { grid-template-columns: 1fr 1fr; }
+      .footer { font-size: 0.7rem; padding: 1.5rem 1rem; }
     }
   </style>
 </head>
