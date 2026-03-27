@@ -82,7 +82,7 @@ func clampOffset(offset int) int {
 	return offset
 }
 
-// GET /v1/indexer/status
+// GET /v1/token-tracker/status
 func (h *handlers) handleStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -110,7 +110,7 @@ func (h *handlers) handleStatus(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /v1/indexer/stats
+// GET /v1/token-tracker/stats
 func (h *handlers) handleStats(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -138,7 +138,7 @@ func (h *handlers) handleStats(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /v1/indexer/addresses?limit=50&offset=0
+// GET /v1/token-tracker/addresses?limit=50&offset=0
 func (h *handlers) handleAddresses(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -165,7 +165,7 @@ func (h *handlers) handleAddresses(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /v1/indexer/address/{address}
+// GET /v1/token-tracker/address/{address}
 func (h *handlers) handleAddress(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -207,7 +207,7 @@ func (h *handlers) handleAddress(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /v1/indexer/holders/{token}?limit=50&offset=0
+// GET /v1/token-tracker/holders/{token}?limit=50&offset=0
 func (h *handlers) handleHolders(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -241,7 +241,7 @@ func (h *handlers) handleHolders(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /v1/indexer/blocks?from=100&to=200
+// GET /v1/token-tracker/blocks?from=100&to=200
 func (h *handlers) handleBlocks(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -284,7 +284,7 @@ func (h *handlers) handleBlocks(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /v1/indexer/transfers/{address}?limit=50&offset=0
+// GET /v1/token-tracker/transfers/{address}?limit=50&offset=0
 func (h *handlers) handleTransfers(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -318,7 +318,7 @@ func (h *handlers) handleTransfers(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// GET /v1/indexer/tokens
+// GET /v1/token-tracker/tokens
 func (h *handlers) handleTokens(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
 		writeError(w, http.StatusMethodNotAllowed, "method not allowed")

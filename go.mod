@@ -9,6 +9,7 @@ require (
 	github.com/mr-tron/base58 v1.2.0
 	github.com/spf13/pflag v1.0.10
 	google.golang.org/protobuf v1.30.0
+	gopkg.in/yaml.v3 v3.0.1
 	modernc.org/sqlite v1.28.0
 )
 

@@ -12,7 +12,6 @@ import (
 	"time"
 
 	log "github.com/koinos/koinos-log-golang/v2"
-	"github.com/koinos/koinos-token-tracker/internal/indexer"
 	"github.com/koinos/koinos-token-tracker/internal/store"
 )
 
@@ -35,7 +34,7 @@ type balanceUpdate struct {
 
 // Run queries the REST API for every known address's KOIN and VHP balance
 // and updates the store with authoritative values.
-func Run(s store.Store, restURL string) error {
+func Run(s store.Store, restURL string, vhpContract string) error {
 	_, total, err := s.GetAddresses(1, 0)
 	if err != nil {
 		return fmt.Errorf("get address count: %w", err)
@@ -59,7 +58,7 @@ func Run(s store.Store, restURL string) error {
 		contract string
 		symbol   string
 	}{
-		{indexer.VhpContract, "VHP"},
+		{vhpContract, "VHP"},
 	}
 
 	var checked atomic.Int64

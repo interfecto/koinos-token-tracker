@@ -2,8 +2,6 @@
 
 Lightweight Go microservice that indexes token balances, transfers, and holder rankings for the Koinos blockchain. Plugs directly into the node's AMQP message bus — no external dependencies.
 
-**Live demo:** [koinosscan.com](https://koinosscan.com) | **API:** [api.koinosscan.com](https://api.koinosscan.com)
-
 ## Architecture
 
 ```
@@ -89,9 +87,10 @@ token_tracker:
     - block_store
   volumes:
     - "${BASEDIR}:/koinos"
+    - "./config:/config:ro"
   ports:
     - "${TOKEN_TRACKER_PORT:-8090}:8090"
-  command: --basedir=/koinos
+  command: --basedir=/koinos --config=/config/config.yml
 ```
 
 ## CLI Flags
@@ -105,6 +104,7 @@ token_tracker:
 | `--reset` | `false` | Delete database and re-sync from genesis |
 | `--reconcile` | `false` | After sync, reconcile VHP balances against REST API |
 | `--rest-url` | `http://127.0.0.1:3000` | REST API URL for reconciliation |
+| `--config, -c` | | Path to Koinos node config.yml (token addresses, migration height) |
 | `--version, -v` | | Print version and exit |
 
 ## API Endpoints
@@ -113,14 +113,14 @@ token_tracker:
 |----------|-------------|
 | `GET /` | Explorer UI |
 | `GET /docs` | Swagger API documentation |
-| `GET /v1/indexer/status` | Sync status, holder counts |
-| `GET /v1/indexer/stats` | Chain statistics |
-| `GET /v1/indexer/addresses?limit=50&offset=0` | All addresses (paginated) |
-| `GET /v1/indexer/address/{address}` | Address balances and first-seen info |
-| `GET /v1/indexer/holders/{token}?limit=50` | Top token holders ranked by balance |
-| `GET /v1/indexer/transfers/{address}?limit=50` | Token transfer history for an address |
-| `GET /v1/indexer/blocks?from=N&to=M` | Block metadata |
-| `GET /v1/indexer/tokens` | Tracked token contracts |
+| `GET /v1/token-tracker/status` | Sync status, holder counts |
+| `GET /v1/token-tracker/stats` | Chain statistics |
+| `GET /v1/token-tracker/addresses?limit=50&offset=0` | All addresses (paginated) |
+| `GET /v1/token-tracker/address/{address}` | Address balances and first-seen info |
+| `GET /v1/token-tracker/holders/{token}?limit=50` | Top token holders ranked by balance |
+| `GET /v1/token-tracker/transfers/{address}?limit=50` | Token transfer history for an address |
+| `GET /v1/token-tracker/blocks?from=N&to=M` | Block metadata |
+| `GET /v1/token-tracker/tokens` | Tracked token contracts |
 | `GET /openapi.json` | OpenAPI 3.0 spec |
 
 ## How Sync Works
@@ -136,6 +136,27 @@ token_tracker:
 - **Size:** ~28GB with full transfer history from genesis
 - **Tables:** `sync_state`, `addresses`, `balances`, `transfers`, `blocks`, `tokens`
 - **Single connection:** `MaxOpenConns(1)` with mutex-protected batch transactions
+
+## Configuration
+
+Token contract addresses and migration parameters default to Koinos mainnet values. For testnet or custom deployments, specify them in the node's `config.yml`:
+
+```yaml
+token-tracker:
+  koin-contract: "19GYjDBVXU7keLbYvMLazsGQn3GTWHjHkK"
+  vhp-contract: "12Y5vW6gk8GceH53YfRkRre2Rrcsgw7Naq"
+  old-koin-contract: "15DJN4a8SgrbGhhGksSBASiSYjGnMU8dGL"
+  old-vhp-contract: "1AdzuXSpC6K9qtXdCBgD5NUpDNwHjMgrc9"
+  kcs4-migration-height: 24804034
+```
+
+Pass the config file path with `--config`:
+
+```bash
+./koinos-token-tracker --basedir=/koinos --config=/config/config.yml
+```
+
+Any omitted fields default to mainnet values. A testnet deployment only needs to override the relevant addresses.
 
 ## Token Contract Addresses
 

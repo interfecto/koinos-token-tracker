@@ -5,55 +5,46 @@ import (
 	"strings"
 
 	"github.com/koinos/koinos-proto-golang/v2/koinos/protocol"
+	"github.com/koinos/koinos-token-tracker/internal/config"
 	"github.com/mr-tron/base58"
 	"google.golang.org/protobuf/encoding/protowire"
 )
 
 const maxSafeValue = uint64(math.MaxInt64)
 
-// Token contract addresses.
-const (
-	KoinContract    = "19GYjDBVXU7keLbYvMLazsGQn3GTWHjHkK" // new KCS-4
-	VhpContract     = "12Y5vW6gk8GceH53YfRkRre2Rrcsgw7Naq" // new KCS-4
-	OldKoinContract = "15DJN4a8SgrbGhhGksSBASiSYjGnMU8dGL" // old KCS-1
-	OldVhpContract  = "1AdzuXSpC6K9qtXdCBgD5NUpDNwHjMgrc9" // old KCS-1
-)
-
 // isTokenEvent returns true if the source is any tracked token (old or new).
-func isTokenEvent(source string) bool {
-	return source == KoinContract || source == VhpContract ||
-		source == OldKoinContract || source == OldVhpContract
+func isTokenEvent(cfg *config.TokenTrackerConfig, source string) bool {
+	if source == "" {
+		return false
+	}
+	return source == cfg.KoinContract || source == cfg.VhpContract ||
+		source == cfg.OldKoinContract || source == cfg.OldVhpContract
 }
-
-// KCS4MigrationHeight is the block where old KCS-1 contracts were replaced by KCS-4.
-// At this height, VHP balances must be reset to zero because the new VHP contract
-// was deployed with pre-loaded state (no burn on old contract = double-counting).
-const KCS4MigrationHeight = uint64(24804034)
 
 // affectsBalance returns true for contracts whose events should update balances.
 // Old KOIN is always tracked (migration did proper burn/mint, net zero).
 // Old VHP is tracked ONLY before migration height. At migration, VHP balances
 // are reset and only new VHP events are counted from that point forward.
-func affectsBalance(source string, height uint64) bool {
+func affectsBalance(cfg *config.TokenTrackerConfig, source string, height uint64) bool {
 	switch source {
-	case KoinContract, OldKoinContract:
+	case cfg.KoinContract, cfg.OldKoinContract:
 		return true
-	case VhpContract:
+	case cfg.VhpContract:
 		return true
-	case OldVhpContract:
-		return height < KCS4MigrationHeight
+	case cfg.OldVhpContract:
+		return height < cfg.KCS4MigrationHeight
 	default:
 		return false
 	}
 }
 
 // normalizeToken maps old contract addresses to new ones for unified transfer history.
-func normalizeToken(source string) string {
-	if source == OldKoinContract {
-		return KoinContract
+func normalizeToken(cfg *config.TokenTrackerConfig, source string) string {
+	if source == cfg.OldKoinContract {
+		return cfg.KoinContract
 	}
-	if source == OldVhpContract {
-		return VhpContract
+	if source == cfg.OldVhpContract {
+		return cfg.VhpContract
 	}
 	return source
 }
@@ -95,8 +86,8 @@ type BalanceChange struct {
 
 // ProcessBlock extracts addresses and balance changes from a block and its receipt.
 // It returns nil if block is nil.
-func ProcessBlock(block *protocol.Block, receipt *protocol.BlockReceipt) *BlockResult {
-	if block == nil {
+func ProcessBlock(cfg *config.TokenTrackerConfig, block *protocol.Block, receipt *protocol.BlockReceipt) *BlockResult {
+	if block == nil || cfg == nil {
 		return nil
 	}
 
@@ -133,7 +124,7 @@ func ProcessBlock(block *protocol.Block, receipt *protocol.BlockReceipt) *BlockR
 	if receipt != nil {
 		// Block-level events (no tx ID)
 		for _, ev := range receipt.Events {
-			processEvent(ev, "", result.Height, addrSet, &result.BalanceChanges, &result.Transfers)
+			processEvent(cfg, ev, "", result.Height, addrSet, &result.BalanceChanges, &result.Transfers)
 		}
 
 		// Per-transaction events (skip reverted transactions)
@@ -147,7 +138,7 @@ func ProcessBlock(block *protocol.Block, receipt *protocol.BlockReceipt) *BlockR
 				txID = encodeAddr(block.Transactions[i].Id)
 			}
 			for _, ev := range txReceipt.Events {
-				processEvent(ev, txID, result.Height, addrSet, &result.BalanceChanges, &result.Transfers)
+				processEvent(cfg, ev, txID, result.Height, addrSet, &result.BalanceChanges, &result.Transfers)
 			}
 		}
 	}
@@ -171,7 +162,7 @@ func ProcessBlock(block *protocol.Block, receipt *protocol.BlockReceipt) *BlockR
 
 // processEvent extracts addresses from an event and, if the event source is a
 // tracked token contract, parses the event data for balance changes.
-func processEvent(ev *protocol.EventData, txID string, height uint64, addrSet map[string]struct{}, changes *[]BalanceChange, transfers *[]TransferRecord) {
+func processEvent(cfg *config.TokenTrackerConfig, ev *protocol.EventData, txID string, height uint64, addrSet map[string]struct{}, changes *[]BalanceChange, transfers *[]TransferRecord) {
 	if ev == nil {
 		return
 	}
@@ -190,14 +181,14 @@ func processEvent(ev *protocol.EventData, txID string, height uint64, addrSet ma
 	}
 
 	// Only parse events from known token contracts (old + new).
-	if !isTokenEvent(source) {
+	if !isTokenEvent(cfg, source) {
 		return
 	}
 
 	// Normalize old contract addresses to new ones for unified history.
-	token := normalizeToken(source)
+	token := normalizeToken(cfg, source)
 	// Balance tracking depends on contract and height (old VHP excluded after migration).
-	updateBalance := affectsBalance(source, height)
+	updateBalance := affectsBalance(cfg, source, height)
 
 	name := ev.Name
 	switch {

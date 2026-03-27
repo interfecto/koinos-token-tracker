@@ -446,7 +446,7 @@
 
   <div class="container">
     <div class="search-bar">
-      <input type="text" class="search-input" id="searchInput" placeholder="Search by address (e.g., 14f34kUNZugf2DK4hPJGy4AkmBM7Y4pvVu)">
+      <input type="text" class="search-input" id="searchInput" placeholder="Search by address (e.g., 1NsQbH5AhQXgtSNg1ejpFqTi2hmCWz1eQS)">
       <button class="search-btn" onclick="searchAddress()">Search</button>
     </div>
 
@@ -605,7 +605,7 @@ async function searchAddress() {
   const addr = document.getElementById('searchInput').value.trim();
   if (!addr) return;
   try {
-    const res = await fetch(`${API}/v1/indexer/address/${addr}`);
+    const res = await fetch(`${API}/v1/token-tracker/address/${addr}`);
     const data = await res.json();
     if (data.error) { alert('Address not found'); return; }
 
@@ -639,7 +639,7 @@ async function loadTransfers(addr) {
   document.getElementById('tab-transfers').classList.add('active');
 
   try {
-    const res = await fetch(`${API}/v1/indexer/transfers/${addr}?limit=50`);
+    const res = await fetch(`${API}/v1/token-tracker/transfers/${addr}?limit=50`);
     const data = await res.json();
     body.innerHTML = '';
     if (!data.transfers || data.transfers.length === 0) {
@@ -674,7 +674,7 @@ function lookupAddr(addr) {
 // Load data
 async function loadStatus() {
   try {
-    const res = await fetch(`${API}/v1/indexer/status`);
+    const res = await fetch(`${API}/v1/token-tracker/status`);
     const d = await res.json();
     document.getElementById('statHeight').textContent = fmt(d.last_indexed_height);
     document.getElementById('statAddresses').textContent = fmt(d.total_addresses);
@@ -696,7 +696,7 @@ async function loadStatus() {
 
 async function loadHolders(token, tableId, countId, label) {
   try {
-    const res = await fetch(`${API}/v1/indexer/holders/${token}?limit=50`);
+    const res = await fetch(`${API}/v1/token-tracker/holders/${token}?limit=50`);
     const d = await res.json();
     document.getElementById(countId).textContent = `${fmt(d.total)} holders`;
     const tbody = document.getElementById(tableId);
@@ -726,7 +726,7 @@ async function loadHolders(token, tableId, countId, label) {
 
 async function loadBlocks() {
   try {
-    const res = await fetch(`${API}/v1/indexer/blocks`);
+    const res = await fetch(`${API}/v1/token-tracker/blocks`);
     const d = await res.json();
     const tbody = document.getElementById('blocksTable');
     tbody.innerHTML = '';
@@ -770,7 +770,7 @@ const chartDefaults = {
 async function loadCharts() {
   try {
     // KOIN distribution donut — top 50
-    const koinRes = await fetch(`${API}/v1/indexer/holders/${KOIN}?limit=50`);
+    const koinRes = await fetch(`${API}/v1/token-tracker/holders/${KOIN}?limit=50`);
     const koinData = await koinRes.json();
     const koinHolders = koinData.holders || [];
     let koinTop = koinHolders.map(h => Number(h.Balance));
@@ -807,7 +807,7 @@ async function loadCharts() {
     });
 
     // VHP distribution donut
-    const vhpRes = await fetch(`${API}/v1/indexer/holders/${VHP}?limit=10`);
+    const vhpRes = await fetch(`${API}/v1/token-tracker/holders/${VHP}?limit=10`);
     const vhpData = await vhpRes.json();
     const vhpHolders = vhpData.holders || [];
     let vhpTop = vhpHolders.map(h => Number(h.Balance));
@@ -844,7 +844,7 @@ async function loadCharts() {
     let tierOffset = 0;
     const tierPage = 1000;
     while (true) {
-      const pg = await fetch(`${API}/v1/indexer/holders/${KOIN}?limit=${tierPage}&offset=${tierOffset}`);
+      const pg = await fetch(`${API}/v1/token-tracker/holders/${KOIN}?limit=${tierPage}&offset=${tierOffset}`);
       const pgData = await pg.json();
       const holders = pgData.holders || [];
       if (holders.length === 0) break;
@@ -900,7 +900,7 @@ async function loadCharts() {
     });
 
     // Network overview stats
-    const statsRes = await fetch(`${API}/v1/indexer/status`);
+    const statsRes = await fetch(`${API}/v1/token-tracker/status`);
     const stats = await statsRes.json();
     const koinPct = ((koinTopSum/1e8) / 64000000 * 100).toFixed(1);
     const vhpPct = ((vhpTopSum/1e8) / 20000000 * 100).toFixed(1);

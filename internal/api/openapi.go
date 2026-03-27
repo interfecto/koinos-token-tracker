@@ -7,7 +7,7 @@ const openAPISpec = `{
   "info": {
     "title": "Koinos Token Tracker API",
     "description": "Lightweight blockchain indexer for the Koinos network. Tracks addresses, token balances (KOIN/VHP), holder rankings, and transfer history. Runs as a microservice alongside the Koinos node.",
-    "version": "0.1.0",
+    "version": "0.2.0",
     "contact": {
       "name": "Koinos Indexer",
       "url": "https://github.com/koinos/koinos-token-tracker"
@@ -20,7 +20,7 @@ const openAPISpec = `{
     }
   ],
   "paths": {
-    "/v1/indexer/status": {
+    "/v1/token-tracker/status": {
       "get": {
         "summary": "Indexer sync status",
         "description": "Returns the current sync progress, last indexed block, and holder counts.",
@@ -46,7 +46,7 @@ const openAPISpec = `{
         }
       }
     },
-    "/v1/indexer/stats": {
+    "/v1/token-tracker/stats": {
       "get": {
         "summary": "Chain statistics",
         "description": "Aggregate statistics including total addresses, holder counts, and tracked tokens.",
@@ -58,7 +58,7 @@ const openAPISpec = `{
         }
       }
     },
-    "/v1/indexer/addresses": {
+    "/v1/token-tracker/addresses": {
       "get": {
         "summary": "List all addresses",
         "description": "Paginated list of all addresses ever seen on the Koinos blockchain.",
@@ -74,13 +74,13 @@ const openAPISpec = `{
         }
       }
     },
-    "/v1/indexer/address/{address}": {
+    "/v1/token-tracker/address/{address}": {
       "get": {
         "summary": "Address details",
         "description": "Returns address info including first seen block and all token balances.",
         "tags": ["Addresses"],
         "parameters": [
-          {"name": "address", "in": "path", "required": true, "schema": {"type": "string"}, "example": "14f34kUNZugf2DK4hPJGy4AkmBM7Y4pvVu"}
+          {"name": "address", "in": "path", "required": true, "schema": {"type": "string"}, "example": "1NsQbH5AhQXgtSNg1ejpFqTi2hmCWz1eQS"}
         ],
         "responses": {
           "200": {
@@ -92,7 +92,7 @@ const openAPISpec = `{
         }
       }
     },
-    "/v1/indexer/holders/{token}": {
+    "/v1/token-tracker/holders/{token}": {
       "get": {
         "summary": "Top token holders",
         "description": "Ranked list of token holders sorted by balance descending.",
@@ -109,13 +109,13 @@ const openAPISpec = `{
         }
       }
     },
-    "/v1/indexer/transfers/{address}": {
+    "/v1/token-tracker/transfers/{address}": {
       "get": {
         "summary": "Token transfer history",
         "description": "Paginated list of KOIN/VHP transfers, mints, and burns involving the given address.",
         "tags": ["Transfers"],
         "parameters": [
-          {"name": "address", "in": "path", "required": true, "schema": {"type": "string"}, "example": "14f34kUNZugf2DK4hPJGy4AkmBM7Y4pvVu"},
+          {"name": "address", "in": "path", "required": true, "schema": {"type": "string"}, "example": "1NsQbH5AhQXgtSNg1ejpFqTi2hmCWz1eQS"},
           {"name": "limit", "in": "query", "schema": {"type": "integer", "default": 50, "maximum": 500}},
           {"name": "offset", "in": "query", "schema": {"type": "integer", "default": 0}}
         ],
@@ -126,7 +126,7 @@ const openAPISpec = `{
         }
       }
     },
-    "/v1/indexer/blocks": {
+    "/v1/token-tracker/blocks": {
       "get": {
         "summary": "Block metadata",
         "description": "Returns block metadata (producer, tx count, timestamp) for a height range.",
@@ -142,7 +142,7 @@ const openAPISpec = `{
         }
       }
     },
-    "/v1/indexer/tokens": {
+    "/v1/token-tracker/tokens": {
       "get": {
         "summary": "Tracked tokens",
         "description": "List of all tracked token contracts.",

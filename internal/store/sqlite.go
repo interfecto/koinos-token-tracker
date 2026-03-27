@@ -11,21 +11,18 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const (
-	koinContract = "19GYjDBVXU7keLbYvMLazsGQn3GTWHjHkK"
-	vhpContract  = "12Y5vW6gk8GceH53YfRkRre2Rrcsgw7Naq"
-)
-
 // SQLiteStore implements Store using a SQLite database.
 type SQLiteStore struct {
-	mu sync.Mutex
-	db *sql.DB
-	tx *sql.Tx // active batch transaction, nil when not in a batch
+	mu           sync.Mutex
+	db           *sql.DB
+	tx           *sql.Tx // active batch transaction, nil when not in a batch
+	koinContract string
+	vhpContract  string
 }
 
 // Open creates (or opens) the SQLite database at dbPath, creates parent
 // directories if needed, runs migrations, and returns a ready Store.
-func Open(dbPath string) (*SQLiteStore, error) {
+func Open(dbPath, koinContract, vhpContract string) (*SQLiteStore, error) {
 	dir := filepath.Dir(dbPath)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return nil, fmt.Errorf("create db directory: %w", err)
@@ -56,7 +53,7 @@ func Open(dbPath string) (*SQLiteStore, error) {
 		return nil, fmt.Errorf("migrate: %w", err)
 	}
 
-	return &SQLiteStore{db: db}, nil
+	return &SQLiteStore{db: db, koinContract: koinContract, vhpContract: vhpContract}, nil
 }
 
 // exec returns the active batch transaction if one exists, otherwise the raw db.
@@ -453,14 +450,14 @@ func (s *SQLiteStore) GetStats() (*Stats, error) {
 
 	if err := s.exec().QueryRow(
 		"SELECT COUNT(*) FROM balances WHERE token = ? AND balance != '0'",
-		koinContract,
+		s.koinContract,
 	).Scan(&st.KoinHolders); err != nil {
 		return nil, fmt.Errorf("count koin holders: %w", err)
 	}
 
 	if err := s.exec().QueryRow(
 		"SELECT COUNT(*) FROM balances WHERE token = ? AND balance != '0'",
-		vhpContract,
+		s.vhpContract,
 	).Scan(&st.VhpHolders); err != nil {
 		return nil, fmt.Errorf("count vhp holders: %w", err)
 	}

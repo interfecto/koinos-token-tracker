@@ -12,6 +12,7 @@ import (
 	"github.com/koinos/koinos-proto-golang/v2/koinos/protocol"
 	"github.com/koinos/koinos-proto-golang/v2/koinos/rpc/block_store"
 	chainrpc "github.com/koinos/koinos-proto-golang/v2/koinos/rpc/chain"
+	"github.com/koinos/koinos-token-tracker/internal/config"
 	"github.com/koinos/koinos-token-tracker/internal/indexer"
 	"github.com/koinos/koinos-token-tracker/internal/store"
 	"google.golang.org/protobuf/proto"
@@ -28,11 +29,12 @@ const (
 type Syncer struct {
 	client *koinosmq.Client
 	store  store.Store
+	cfg    *config.TokenTrackerConfig
 }
 
 // NewSyncer creates a new Syncer backed by the given AMQP client and store.
-func NewSyncer(client *koinosmq.Client, store store.Store) *Syncer {
-	return &Syncer{client: client, store: store}
+func NewSyncer(client *koinosmq.Client, store store.Store, cfg *config.TokenTrackerConfig) *Syncer {
+	return &Syncer{client: client, store: store, cfg: cfg}
 }
 
 // GetHeadInfo calls chain.GetHeadInfo via AMQP RPC and returns the current
@@ -252,7 +254,7 @@ func (s *Syncer) ProcessAndStore(block *protocol.Block, receipt *protocol.BlockR
 // processAndStoreInternal does the actual work of processing a block and
 // writing results to the store. It assumes a batch is already active.
 func (s *Syncer) processAndStoreInternal(block *protocol.Block, receipt *protocol.BlockReceipt) error {
-	result := indexer.ProcessBlock(block, receipt)
+	result := indexer.ProcessBlock(s.cfg, block, receipt)
 	if result == nil {
 		return nil
 	}
@@ -269,9 +271,9 @@ func (s *Syncer) processAndStoreInternal(block *protocol.Block, receipt *protoco
 
 	// At KCS-4 migration height, reset VHP balances to avoid double-counting.
 	// Old VHP was never burned during migration; new VHP events provide fresh starting balances.
-	if height == indexer.KCS4MigrationHeight {
+	if height == s.cfg.KCS4MigrationHeight {
 		log.Infof("KCS-4 migration at height %d: resetting VHP balances", height)
-		if err := s.store.ResetTokenBalances(indexer.VhpContract); err != nil {
+		if err := s.store.ResetTokenBalances(s.cfg.VhpContract); err != nil {
 			return fmt.Errorf("reset VHP balances at migration: %w", err)
 		}
 	}
@@ -333,4 +335,3 @@ func (s *Syncer) processAndStoreInternal(block *protocol.Block, receipt *protoco
 
 	return nil
 }
-
