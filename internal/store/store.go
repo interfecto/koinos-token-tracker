@@ -22,6 +22,9 @@ type Store interface {
 	GetBlock(height uint64) (*Block, error)
 	GetBlocks(from, to uint64) ([]Block, error)
 
+	// Producers
+	GetProducers(heightCutoff uint64) ([]Producer, error)
+
 	// Tokens
 	UpsertToken(address, symbol string, decimals int, totalSupply string) error
 	GetToken(address string) (*Token, error)
@@ -67,6 +70,14 @@ type Block struct {
 	Timestamp uint64
 	Signer    string
 	TxCount   int
+}
+
+// Producer represents aggregated block production stats for a signer.
+type Producer struct {
+	Address       string `json:"address"`
+	Blocks24h     int    `json:"blocks_24h"`
+	LastBlockTime uint64 `json:"last_block_time"`
+	VhpBalance    string `json:"vhp_balance"`
 }
 
 // Token represents a tracked token contract.

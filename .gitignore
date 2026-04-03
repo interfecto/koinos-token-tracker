@@ -1,7 +1,7 @@
 # Binaries
 *.linux
 *-linux
-koinos-token-tracker
+/koinos-token-tracker
 debug-addr-linux
 
 # Data
@@ -20,3 +20,6 @@ balances.csv
 
 # OS
 .DS_Store
+*.deploy
+koinos-token-tracker-linux
+koinos-token-tracker-deploy

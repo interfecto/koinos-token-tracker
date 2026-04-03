@@ -33,6 +33,8 @@ CREATE TABLE IF NOT EXISTS blocks (
     tx_count    INTEGER NOT NULL DEFAULT 0
 );
 
+CREATE INDEX IF NOT EXISTS idx_blocks_signer ON blocks(signer, height);
+
 CREATE TABLE IF NOT EXISTS tokens (
     address      TEXT PRIMARY KEY,
     symbol       TEXT NOT NULL DEFAULT '',

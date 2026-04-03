@@ -294,6 +294,99 @@ func (s *SQLiteStore) GetBlocks(from, to uint64) ([]Block, error) {
 }
 
 // ---------------------------------------------------------------------------
+// Producers
+// ---------------------------------------------------------------------------
+
+func (s *SQLiteStore) GetProducers(heightCutoff uint64) ([]Producer, error) {
+	// Step 1: aggregate block production stats from recent blocks.
+	rows, err := s.exec().Query(
+		`SELECT signer, COUNT(*) as blocks, MAX(timestamp) as last_ts
+		 FROM blocks
+		 WHERE signer != '' AND height >= ?
+		 GROUP BY signer
+		 ORDER BY blocks DESC`,
+		heightCutoff,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get producers blocks: %w", err)
+	}
+	defer rows.Close()
+
+	type prodEntry struct {
+		blocks24h     int
+		lastBlockTime uint64
+	}
+	prodMap := make(map[string]*prodEntry)
+	for rows.Next() {
+		var signer string
+		var blocks int
+		var lastTs uint64
+		if err := rows.Scan(&signer, &blocks, &lastTs); err != nil {
+			return nil, fmt.Errorf("scan producer: %w", err)
+		}
+		prodMap[signer] = &prodEntry{blocks24h: blocks, lastBlockTime: lastTs}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate producers: %w", err)
+	}
+
+	// Step 2: get all VHP holders (potential producers).
+	vhpRows, err := s.exec().Query(
+		`SELECT address, balance FROM balances
+		 WHERE token = ? AND balance != '0'
+		 ORDER BY LENGTH(balance) DESC, balance DESC`,
+		s.vhpContract,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get vhp holders: %w", err)
+	}
+	defer vhpRows.Close()
+
+	// Step 3: merge block stats with VHP balances.
+	seen := make(map[string]bool)
+	var producers []Producer
+	for vhpRows.Next() {
+		var addr, balance string
+		if err := vhpRows.Scan(&addr, &balance); err != nil {
+			return nil, fmt.Errorf("scan vhp holder: %w", err)
+		}
+		seen[addr] = true
+		p := Producer{Address: addr, VhpBalance: balance}
+		if entry, ok := prodMap[addr]; ok {
+			p.Blocks24h = entry.blocks24h
+			p.LastBlockTime = entry.lastBlockTime
+		}
+		producers = append(producers, p)
+	}
+	if err := vhpRows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate vhp holders: %w", err)
+	}
+
+	// Step 4: add producers who have blocks but no current VHP balance.
+	for addr, entry := range prodMap {
+		if !seen[addr] {
+			producers = append(producers, Producer{
+				Address:       addr,
+				Blocks24h:     entry.blocks24h,
+				LastBlockTime: entry.lastBlockTime,
+				VhpBalance:    "0",
+			})
+		}
+	}
+
+	// Sort by blocks_24h descending (active producers first).
+	for i := 0; i < len(producers); i++ {
+		for j := i + 1; j < len(producers); j++ {
+			if producers[j].Blocks24h > producers[i].Blocks24h {
+				producers[i], producers[j] = producers[j], producers[i]
+			}
+		}
+	}
+
+	return producers, nil
+}
+
+// ---------------------------------------------------------------------------
 // Tokens
 // ---------------------------------------------------------------------------
 

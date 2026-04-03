@@ -32,6 +32,7 @@ func (s *Server) Start(ctx context.Context) error {
 	mux.HandleFunc("/v1/token-tracker/address/", h.handleAddress)
 	mux.HandleFunc("/v1/token-tracker/holders/", h.handleHolders)
 	mux.HandleFunc("/v1/token-tracker/blocks", h.handleBlocks)
+	mux.HandleFunc("/v1/token-tracker/producers", h.handleProducers)
 	mux.HandleFunc("/v1/token-tracker/tokens", h.handleTokens)
 	mux.HandleFunc("/v1/token-tracker/transfers/", h.handleTransfers)
 	mux.HandleFunc("/openapi.json", h.handleOpenAPI)

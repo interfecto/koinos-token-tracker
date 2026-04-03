@@ -318,6 +318,44 @@ func (h *handlers) handleTransfers(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GET /v1/token-tracker/producers
+func (h *handlers) handleProducers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	height, _, err := h.store.GetSyncState()
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+
+	// ~24h of blocks at 3s per block = 28800 blocks
+	cutoff := uint64(0)
+	if height > 28800 {
+		cutoff = height - 28800
+	}
+
+	producers, err := h.store.GetProducers(cutoff)
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+
+	// Compute total blocks in last 24h for percentage calculation.
+	total24h := 0
+	for _, p := range producers {
+		total24h += p.Blocks24h
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"producers":    producers,
+		"total_blocks": total24h,
+		"height":       height,
+	})
+}
+
 // GET /v1/token-tracker/tokens
 func (h *handlers) handleTokens(w http.ResponseWriter, r *http.Request) {
 	if r.Method != "GET" {
