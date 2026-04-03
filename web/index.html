@@ -507,12 +507,13 @@
       <div class="table-card">
         <div class="table-header">
           <h2>Recent Token Transfers</h2>
+          <button id="csvExportBtn" style="display:none;background:var(--accent-teal);color:#fff;border:none;padding:0.4rem 1rem;border-radius:6px;cursor:pointer;font-size:0.8rem;font-weight:500;" onclick="exportCSV()">Export CSV</button>
         </div>
         <div style="padding: 1rem; color: var(--text-muted); font-size: 0.85rem;">
           Search an address above to view its transfer history.
         </div>
         <table id="transfersTable" style="display:none">
-          <thead><tr><th>Block</th><th>Type</th><th>Token</th><th>From</th><th>To</th><th style="text-align:right">Amount</th></tr></thead>
+          <thead><tr><th>Block</th><th>Time</th><th>Type</th><th>Token</th><th>From</th><th>To</th><th style="text-align:right">Amount</th></tr></thead>
           <tbody id="transfersBody"></tbody>
         </table>
       </div>
@@ -582,8 +583,17 @@ function shortAddr(a) {
   return a.length > 20 ? a.slice(0, 10) + '...' + a.slice(-8) : a;
 }
 function timeAgo(ts) {
-  const d = new Date(Number(ts));
-  return d.toLocaleString();
+  const now = Date.now();
+  const diff = now - Number(ts);
+  if (diff < 0) return 'just now';
+  if (diff < 60000) return Math.floor(diff / 1000) + 's ago';
+  if (diff < 3600000) return Math.floor(diff / 60000) + 'm ago';
+  if (diff < 86400000) return Math.floor(diff / 3600000) + 'h ago';
+  if (diff < 2592000000) return Math.floor(diff / 86400000) + 'd ago';
+  return new Date(Number(ts)).toLocaleDateString();
+}
+function fullTime(ts) {
+  return new Date(Number(ts)).toLocaleString();
 }
 
 // Tabs
@@ -626,11 +636,15 @@ function closeDetail() {
   document.getElementById('addressDetail').classList.remove('visible');
 }
 
+let currentTransferAddr = '';
+
 async function loadTransfers(addr) {
+  currentTransferAddr = addr;
   const tbl = document.getElementById('transfersTable');
   const body = document.getElementById('transfersBody');
   tbl.style.display = 'table';
-  body.innerHTML = '<tr><td colspan="6" class="loading"><span class="spinner"></span>Loading transfers...</td></tr>';
+  body.innerHTML = '<tr><td colspan="7" class="loading"><span class="spinner"></span>Loading transfers...</td></tr>';
+  document.getElementById('csvExportBtn').style.display = 'none';
 
   // Switch to transfers tab
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
@@ -643,10 +657,11 @@ async function loadTransfers(addr) {
     const data = await res.json();
     body.innerHTML = '';
     if (!data.transfers || data.transfers.length === 0) {
-      body.innerHTML = '<tr><td colspan="6" style="padding:1rem;color:var(--text-muted)">No transfers found</td></tr>';
+      body.innerHTML = '<tr><td colspan="7" style="padding:1rem;color:var(--text-muted)">No transfers found</td></tr>';
       return;
     }
     document.querySelector('#tab-transfers .table-header h2').textContent = `Transfers (${fmt(data.total)} total)`;
+    document.getElementById('csvExportBtn').style.display = 'inline-block';
     data.transfers.forEach(t => {
       const token = t.token === KOIN ? 'KOIN' : 'VHP';
       const tokenClass = t.token === KOIN ? 'balance-koin' : 'balance-vhp';
@@ -654,6 +669,7 @@ async function loadTransfers(addr) {
       const tr = document.createElement('tr');
       tr.innerHTML = `
         <td style="font-family:'JetBrains Mono',monospace;font-size:0.8rem">${fmt(t.height)}</td>
+        <td style="color:var(--text-muted);font-size:0.8rem" title="${fullTime(t.timestamp)}">${timeAgo(t.timestamp)}</td>
         <td><span class="event-type ${typeClass}">${t.event_type}</span></td>
         <td class="${tokenClass}" style="font-weight:500">${token}</td>
         <td class="address" onclick="lookupAddr('${t.from}')" title="${t.from}">${t.from ? shortAddr(t.from) : '<span style="color:var(--text-muted)">mint</span>'}</td>
@@ -662,7 +678,55 @@ async function loadTransfers(addr) {
       `;
       body.appendChild(tr);
     });
-  } catch(e) { body.innerHTML = '<tr><td colspan="6" style="color:var(--accent-red)">Error loading transfers</td></tr>'; }
+  } catch(e) { body.innerHTML = '<tr><td colspan="7" style="color:var(--accent-red)">Error loading transfers</td></tr>'; }
+}
+
+async function exportCSV() {
+  if (!currentTransferAddr) return;
+  const btn = document.getElementById('csvExportBtn');
+  const origText = btn.textContent;
+  btn.disabled = true;
+  btn.textContent = 'Fetching...';
+
+  const allTransfers = [];
+  const pageSize = 200;
+  const maxRows = 1000;
+  try {
+    while (allTransfers.length < maxRows) {
+      const res = await fetch(`${API}/v1/token-tracker/transfers/${currentTransferAddr}?limit=${pageSize}&offset=${allTransfers.length}`);
+      const data = await res.json();
+      if (!data.transfers || data.transfers.length === 0) break;
+      allTransfers.push(...data.transfers);
+      btn.textContent = `Fetching... ${allTransfers.length}`;
+      if (data.transfers.length < pageSize) break;
+    }
+
+    const rows = [['Block','Timestamp','Type','Token','From','To','Amount']];
+    allTransfers.forEach(t => {
+      rows.push([
+        t.height,
+        new Date(Number(t.timestamp)).toISOString(),
+        t.event_type,
+        t.token === KOIN ? 'KOIN' : 'VHP',
+        t.from || '',
+        t.to || '',
+        (Number(t.value) / 1e8).toFixed(8)
+      ]);
+    });
+
+    const csv = rows.map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\n');
+    const blob = new Blob([csv], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${currentTransferAddr}_transfers.csv`;
+    a.click();
+    URL.revokeObjectURL(url);
+  } catch(e) {
+    console.error('CSV export failed:', e);
+  }
+  btn.disabled = false;
+  btn.textContent = origText;
 }
 
 function lookupAddr(addr) {
@@ -736,7 +800,7 @@ async function loadBlocks() {
         <td style="font-family:'JetBrains Mono',monospace;font-weight:600">${fmt(b.Height)}</td>
         <td class="address" onclick="lookupAddr('${b.Signer}')" title="${b.Signer}">${shortAddr(b.Signer)}</td>
         <td>${b.TxCount}</td>
-        <td style="color:var(--text-muted);font-size:0.8rem">${timeAgo(b.Timestamp)}</td>
+        <td style="color:var(--text-muted);font-size:0.8rem" title="${fullTime(b.Timestamp)}">${timeAgo(b.Timestamp)}</td>
       `;
       tbody.appendChild(tr);
     });
@@ -751,8 +815,9 @@ loadHolders(KOIN, 'koinTable', 'koinHolderCount');
 loadHolders(VHP, 'vhpTable', 'vhpHolderCount');
 loadBlocks();
 
-// Auto-refresh status every 30s
+// Auto-refresh status and blocks every 30s
 setInterval(loadStatus, 30000);
+setInterval(loadBlocks, 30000);
 
 // Charts
 const chartColors = ['#06b6d4','#f59e0b','#8b5cf6','#10b981','#ef4444','#ec4899','#3b82f6','#14b8a6','#f97316','#6366f1'];
