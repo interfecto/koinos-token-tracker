@@ -346,6 +346,12 @@
     }
     @keyframes spin { to { transform: rotate(360deg); } }
 
+    /* Sort indicators */
+    th[onclick] { user-select: none; }
+    th[onclick]:hover { color: var(--accent-teal); }
+    .sort-indicator { font-size: 0.65rem; opacity: 0.4; }
+    .sort-indicator.active { opacity: 1; color: var(--accent-teal); }
+
     /* Footer */
     .footer {
       text-align: center;
@@ -538,7 +544,17 @@
           <span class="count" id="producerCount"></span>
         </div>
         <table>
-          <thead><tr><th style="width:32px"></th><th>#</th><th>Address</th><th style="text-align:right">VHP</th><th style="text-align:right">Blocks (24h)</th><th style="text-align:right">Share</th><th style="text-align:right">Last Block</th></tr></thead>
+          <thead><tr>
+            <th style="width:32px;cursor:pointer" onclick="sortProducers('status')">
+              <span class="sort-indicator" id="sort-status"></span>
+            </th>
+            <th>#</th>
+            <th>Address</th>
+            <th style="text-align:right;cursor:pointer" onclick="sortProducers('vhp')">VHP <span class="sort-indicator" id="sort-vhp"></span></th>
+            <th style="text-align:right;cursor:pointer" onclick="sortProducers('blocks')">Blocks (24h) <span class="sort-indicator" id="sort-blocks"></span></th>
+            <th style="text-align:right;cursor:pointer" onclick="sortProducers('share')">Share <span class="sort-indicator" id="sort-share"></span></th>
+            <th style="text-align:right;cursor:pointer" onclick="sortProducers('last')">Last Block <span class="sort-indicator" id="sort-last"></span></th>
+          </tr></thead>
           <tbody id="producersTable"><tr><td colspan="7" class="loading"><span class="spinner"></span>Loading...</td></tr></tbody>
         </table>
       </div>
@@ -759,33 +775,69 @@ async function loadBlocks() {
   }
 }
 
+let producerData = [];
+let producerTotalBlocks = 0;
+let producerSort = { col: 'blocks', dir: 'desc' };
+
+function renderProducers() {
+  const tbody = document.getElementById('producersTable');
+  tbody.innerHTML = '';
+  const sorted = [...producerData];
+  const TWO_HOURS = 2 * 60 * 60 * 1000;
+  const dir = producerSort.dir === 'desc' ? -1 : 1;
+  sorted.sort((a, b) => {
+    let va, vb;
+    switch (producerSort.col) {
+      case 'status':
+        va = a.last_block_time && (Date.now() - Number(a.last_block_time)) < TWO_HOURS ? 1 : 0;
+        vb = b.last_block_time && (Date.now() - Number(b.last_block_time)) < TWO_HOURS ? 1 : 0;
+        break;
+      case 'vhp': va = Number(a.vhp_balance); vb = Number(b.vhp_balance); break;
+      case 'blocks': case 'share': va = a.blocks_24h; vb = b.blocks_24h; break;
+      case 'last': va = Number(a.last_block_time || 0); vb = Number(b.last_block_time || 0); break;
+      default: va = a.blocks_24h; vb = b.blocks_24h;
+    }
+    return (va - vb) * dir;
+  });
+  document.querySelectorAll('.sort-indicator').forEach(el => { el.classList.remove('active'); el.textContent = ''; });
+  const ind = document.getElementById('sort-' + producerSort.col);
+  if (ind) { ind.classList.add('active'); ind.textContent = producerSort.dir === 'desc' ? ' \u25BC' : ' \u25B2'; }
+  sorted.forEach((p, i) => {
+    const isActive = p.last_block_time && (Date.now() - Number(p.last_block_time)) < TWO_HOURS;
+    const pct = producerTotalBlocks > 0 ? (p.blocks_24h / producerTotalBlocks * 100) : 0;
+    const tr = document.createElement('tr');
+    tr.innerHTML = `
+      <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${isActive ? 'var(--accent-green)' : 'var(--accent-red)'};box-shadow:0 0 6px ${isActive ? 'rgba(16,185,129,0.5)' : 'rgba(239,68,68,0.3)'}"></span></td>
+      <td class="rank">${i + 1}</td>
+      <td class="address" onclick="lookupAddr('${p.address}')" title="${p.address}">${shortAddr(p.address)}</td>
+      <td class="balance balance-vhp" style="text-align:right">${fmtBal(p.vhp_balance)}</td>
+      <td style="text-align:right;font-family:'JetBrains Mono',monospace">${fmt(p.blocks_24h)}</td>
+      <td class="pct">${pct.toFixed(1)}%</td>
+      <td style="text-align:right;color:var(--text-muted);font-size:0.8rem">${p.last_block_time ? timeAgo(p.last_block_time) : 'Never'}</td>
+    `;
+    tbody.appendChild(tr);
+  });
+}
+
+function sortProducers(col) {
+  if (producerSort.col === col) {
+    producerSort.dir = producerSort.dir === 'desc' ? 'asc' : 'desc';
+  } else {
+    producerSort.col = col;
+    producerSort.dir = 'desc';
+  }
+  renderProducers();
+}
+
 async function loadProducers() {
   try {
     const res = await fetch(`${API}/v1/token-tracker/producers`);
     const d = await res.json();
-    const tbody = document.getElementById('producersTable');
-    const countEl = document.getElementById('producerCount');
-    tbody.innerHTML = '';
-    const producers = d.producers || [];
-    const totalBlocks = d.total_blocks || 0;
-    const activeCount = producers.filter(p => p.blocks_24h > 0).length;
-    countEl.textContent = `${activeCount} active / ${producers.length} total`;
-    producers.forEach((p, i) => {
-      const TWO_HOURS = 2 * 60 * 60 * 1000;
-      const isActive = p.last_block_time && (Date.now() - Number(p.last_block_time)) < TWO_HOURS;
-      const pct = totalBlocks > 0 ? (p.blocks_24h / totalBlocks * 100) : 0;
-      const tr = document.createElement('tr');
-      tr.innerHTML = `
-        <td><span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${isActive ? 'var(--accent-green)' : 'var(--accent-red)'};box-shadow:0 0 6px ${isActive ? 'rgba(16,185,129,0.5)' : 'rgba(239,68,68,0.3)'}"></span></td>
-        <td class="rank">${i + 1}</td>
-        <td class="address" onclick="lookupAddr('${p.address}')" title="${p.address}">${shortAddr(p.address)}</td>
-        <td class="balance balance-vhp" style="text-align:right">${fmtBal(p.vhp_balance)}</td>
-        <td style="text-align:right;font-family:'JetBrains Mono',monospace">${fmt(p.blocks_24h)}</td>
-        <td class="pct">${pct.toFixed(1)}%</td>
-        <td style="text-align:right;color:var(--text-muted);font-size:0.8rem">${p.last_block_time ? timeAgo(p.last_block_time) : 'Never'}</td>
-      `;
-      tbody.appendChild(tr);
-    });
+    producerData = d.producers || [];
+    producerTotalBlocks = d.total_blocks || 0;
+    const activeCount = producerData.filter(p => p.blocks_24h > 0).length;
+    document.getElementById('producerCount').textContent = `${activeCount} active / ${producerData.length} total`;
+    renderProducers();
   } catch(e) {
     document.getElementById('producersTable').innerHTML = '<tr><td colspan="7" style="color:var(--accent-red)">Error loading producers</td></tr>';
   }
