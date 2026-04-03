@@ -374,6 +374,24 @@ func (s *SQLiteStore) GetProducers(heightCutoff uint64) ([]Producer, error) {
 		}
 	}
 
+	// Step 5: for producers missing last_block_time (not in 24h window),
+	// look up their actual last block via the signer index.
+	for i := range producers {
+		if producers[i].LastBlockTime == 0 {
+			var maxHeight sql.NullInt64
+			err := s.exec().QueryRow(
+				"SELECT MAX(height) FROM blocks WHERE signer = ?",
+				producers[i].Address,
+			).Scan(&maxHeight)
+			if err == nil && maxHeight.Valid && maxHeight.Int64 > 0 {
+				b, _ := s.GetBlock(uint64(maxHeight.Int64))
+				if b != nil {
+					producers[i].LastBlockTime = b.Timestamp
+				}
+			}
+		}
+	}
+
 	// Sort by blocks_24h descending (active producers first).
 	for i := 0; i < len(producers); i++ {
 		for j := i + 1; j < len(producers); j++ {
