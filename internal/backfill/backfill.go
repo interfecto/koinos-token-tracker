@@ -552,14 +552,15 @@ var ErrNotRegistered = errors.New("token has no backfill record")
 // is the reference account whose history tells how far the history indexer
 // has come (see HistoryHeight).
 func Run(ctx context.Context, s store.Store, restURL, fallbackURL, token, ref string) (*Result, error) {
+	res := &Result{} // never nil: callers report res.LastSeq alongside any error
 	bf, err := s.GetBackfill(token)
 	if err != nil {
-		return nil, err
+		return res, err
 	}
 	if bf == nil {
-		return nil, ErrNotRegistered
+		return res, ErrNotRegistered
 	}
-	res := &Result{LastSeq: bf.NextSeq}
+	res.LastSeq = bf.NextSeq
 	if bf.Done {
 		res.Done = true
 		return res, nil

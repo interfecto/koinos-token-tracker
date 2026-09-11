@@ -29,11 +29,13 @@ func (c *TokenTrackerConfig) IsExtra(addr string) bool {
 	return ok
 }
 
-// SetExtraTokens replaces the extra token set; KOIN/VHP and blanks are ignored.
+// SetExtraTokens replaces the extra token set; KOIN/VHP (current and legacy
+// contracts, whose events are normalised to the current ones) and blanks are
+// ignored.
 func (c *TokenTrackerConfig) SetExtraTokens(addrs []string) {
 	c.ExtraTokens = make(map[string]struct{}, len(addrs))
 	for _, a := range addrs {
-		if a == "" || a == c.KoinContract || a == c.VhpContract {
+		if a == "" || a == c.KoinContract || a == c.VhpContract || a == c.OldKoinContract || a == c.OldVhpContract {
 			continue
 		}
 		c.ExtraTokens[a] = struct{}{}

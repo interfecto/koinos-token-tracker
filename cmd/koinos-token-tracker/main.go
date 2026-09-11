@@ -106,7 +106,7 @@ func main() {
 	}
 
 	if *dryRunToken != "" {
-		os.Exit(runBackfillDryRun(*dryRunToken, *restURL, *restFallback, *rpcURL))
+		os.Exit(runBackfillDryRun(*dryRunToken, *restURL, *restFallback, *rpcURL, cfg.KoinContract))
 	}
 
 	if *apiOnly && *reset {
@@ -334,6 +334,12 @@ func registerTrackedTokens(db *store.SQLiteStore, cfg *config.TokenTrackerConfig
 			log.Warnf("--track-token %s: KOIN/VHP are always tracked", addr)
 			continue
 		}
+		if addr == cfg.OldKoinContract || addr == cfg.OldVhpContract {
+			// live indexing folds the legacy contracts' events into the
+			// current KOIN/VHP; a separate record would replay history under
+			// the old address and then never receive another event
+			return fmt.Errorf("--track-token %s: legacy KOIN/VHP contract, its events are tracked under the current contract", addr)
+		}
 		if !isContractAddress(addr) {
 			return fmt.Errorf("--track-token %s: not a Koinos contract address", addr)
 		}
@@ -477,7 +483,7 @@ func fetchTokenInfo(restURL, addr string) (*tokenInfo, error) {
 // runBackfillDryRun replays a token's whole history in memory and compares
 // every resulting balance with the chain's balance_of. Exit code 0 only when
 // every holder was answered and matched. Touches no database.
-func runBackfillDryRun(token, restURL, fallbackURL, rpcURL string) int {
+func runBackfillDryRun(token, restURL, fallbackURL, rpcURL, ref string) int {
 	if !isContractAddress(token) {
 		fmt.Fprintln(os.Stderr, "not a Koinos contract address")
 		return 2
@@ -494,6 +500,13 @@ func runBackfillDryRun(token, restURL, fallbackURL, rpcURL string) int {
 		return 1
 	}
 	fmt.Printf("%s (%s): %d history entries, %d token events, %d holders, %s\n", token, info.Symbol, res.Entries, res.Ops, len(balances), time.Since(start).Round(time.Second))
+	// Operational context: how far the history indexer (the completion
+	// evidence a real backfill relies on) has come on this node.
+	if h, err := backfill.NewClient(restURL, fallbackURL).HistoryHeight(context.Background(), ref); err != nil {
+		fmt.Printf("history indexer height: unavailable (%v) — a real backfill could not complete on this node right now\n", err)
+	} else {
+		fmt.Printf("history indexer height: %d (reference account %s)\n", h, ref)
+	}
 	client := &http.Client{Timeout: 15 * time.Second}
 	mismatches, failures, checked := 0, 0, 0
 	for addr, bal := range balances {

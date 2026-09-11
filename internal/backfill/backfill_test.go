@@ -431,8 +431,12 @@ func TestFallbackNodeResolvesTransaction(t *testing.T) {
 
 func TestRunRequiresRegistration(t *testing.T) {
 	s := newStore(t)
-	if _, err := Run(context.Background(), s, "http://127.0.0.1:1", "", tok, refAcct); err != ErrNotRegistered {
+	res, err := Run(context.Background(), s, "http://127.0.0.1:1", "", tok, refAcct)
+	if err != ErrNotRegistered {
 		t.Fatalf("expected ErrNotRegistered, got %v", err)
+	}
+	if res == nil {
+		t.Fatal("Run must return a result alongside the error (callers report res.LastSeq)")
 	}
 }
 
