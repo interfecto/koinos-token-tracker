@@ -34,6 +34,7 @@ type Store interface {
 	GetTransfersByAddress(address string, limit, offset int) ([]Transfer, int, bool, error)
 	GetTransfersByToken(token string, limit, offset int) ([]Transfer, int, error)
 	GetRecentTransfers(limit int) ([]Transfer, error)
+	GetRecentTransfersFiltered(token, eventType string, limit int) ([]Transfer, error)
 
 	// Producers
 	GetProducers(windowBlocks uint64) ([]Producer, int, error)

@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -464,6 +465,46 @@ func (s *SQLiteStore) GetRecentTransfers(limit int) ([]Transfer, error) {
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get recent transfers: %w", err)
+	}
+	defer rows.Close()
+
+	transfers := make([]Transfer, 0)
+	for rows.Next() {
+		var t Transfer
+		if err := rows.Scan(&t.ID, &t.Height, &t.TxID, &t.Token, &t.From, &t.To, &t.Value, &t.EventType, &t.Timestamp); err != nil {
+			return nil, fmt.Errorf("scan transfer: %w", err)
+		}
+		transfers = append(transfers, t)
+	}
+	return transfers, rows.Err()
+}
+
+// GetRecentTransfersFiltered returns the newest transfers, optionally limited
+// to one token and/or one event type (transfer, mint, burn), newest first.
+// It walks idx_transfers_token (token, height DESC) from the top until limit
+// rows match, so even KOIN — where block-reward mints outnumber real
+// transfers roughly a thousand to one — answers in milliseconds.
+func (s *SQLiteStore) GetRecentTransfersFiltered(token, eventType string, limit int) ([]Transfer, error) {
+	where := make([]string, 0, 2)
+	args := make([]interface{}, 0, 3)
+	if token != "" {
+		where = append(where, "token = ?")
+		args = append(args, token)
+	}
+	if eventType != "" {
+		where = append(where, "event_type = ?")
+		args = append(args, eventType)
+	}
+	q := `SELECT id, height, tx_id, token, from_addr, to_addr, value, event_type, timestamp FROM transfers`
+	if len(where) > 0 {
+		q += " WHERE " + strings.Join(where, " AND ")
+	}
+	q += " ORDER BY height DESC, id DESC LIMIT ?"
+	args = append(args, limit)
+
+	rows, err := s.exec().Query(q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("get recent transfers filtered: %w", err)
 	}
 	defer rows.Close()
 

@@ -303,17 +303,45 @@ func (h *handlers) handleTransfers(w http.ResponseWriter, r *http.Request) {
 		limit = 500
 	}
 
-	// "recent" is not a valid base58 address, so it can't shadow a real one
+	// "recent" is not a valid base58 address, so it can't shadow a real one.
+	// Optional filters: ?token=<contract> and ?type=transfer|mint|burn — the
+	// explorer's token pages use them to show real transfers instead of the
+	// block-reward mints that dominate the unfiltered feed.
 	if query == "recent" {
-		transfers, err := h.store.GetRecentTransfers(limit)
+		token := r.URL.Query().Get("token")
+		eventType := r.URL.Query().Get("type")
+		if token != "" && (len(token) > 50 || !validBase58.MatchString(token)) {
+			writeError(w, http.StatusBadRequest, "invalid token address")
+			return
+		}
+		if eventType != "" && eventType != "transfer" && eventType != "mint" && eventType != "burn" {
+			writeError(w, http.StatusBadRequest, "invalid type (transfer, mint or burn)")
+			return
+		}
+		var (
+			transfers []store.Transfer
+			err       error
+		)
+		if token != "" || eventType != "" {
+			transfers, err = h.store.GetRecentTransfersFiltered(token, eventType, limit)
+		} else {
+			transfers, err = h.store.GetRecentTransfers(limit)
+		}
 		if err != nil {
 			internalError(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]interface{}{
+		resp := map[string]interface{}{
 			"limit":     limit,
 			"transfers": transfers,
-		})
+		}
+		if token != "" {
+			resp["token"] = token
+		}
+		if eventType != "" {
+			resp["type"] = eventType
+		}
+		writeJSON(w, http.StatusOK, resp)
 		return
 	}
 
