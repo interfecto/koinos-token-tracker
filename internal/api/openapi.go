@@ -142,6 +142,41 @@ const openAPISpec = `{
         }
       }
     },
+    "/v1/token-tracker/producers": {
+      "get": {
+        "summary": "Block producers",
+        "description": "Returns all block producers with their 24h block count, last block time, and VHP balance. Includes VHP holders who have not produced recently.",
+        "tags": ["Producers"],
+        "responses": {
+          "200": {
+            "description": "Producer list with stats",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "producers": {
+                      "type": "array",
+                      "items": {
+                        "type": "object",
+                        "properties": {
+                          "address": {"type": "string"},
+                          "blocks_24h": {"type": "integer"},
+                          "last_block_time": {"type": "integer"},
+                          "vhp_balance": {"type": "string"}
+                        }
+                      }
+                    },
+                    "total_blocks": {"type": "integer", "description": "Total blocks produced in last 24h"},
+                    "height": {"type": "integer"}
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/v1/token-tracker/tokens": {
       "get": {
         "summary": "Tracked tokens",
@@ -160,7 +195,8 @@ const openAPISpec = `{
     {"name": "Addresses", "description": "Address discovery and lookup"},
     {"name": "Tokens", "description": "Token holders and metadata"},
     {"name": "Transfers", "description": "Token transfer history"},
-    {"name": "Blocks", "description": "Block metadata"}
+    {"name": "Blocks", "description": "Block metadata"},
+    {"name": "Producers", "description": "Block producer stats and status"}
   ]
 }`
 

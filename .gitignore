@@ -21,3 +21,6 @@ balances.csv
 # OS
 .DS_Store
 *-linux-new
+*.deploy
+koinos-token-tracker-linux
+koinos-token-tracker-deploy
