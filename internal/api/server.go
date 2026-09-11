@@ -26,14 +26,19 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := http.NewServeMux()
 
 	h := &handlers{store: s.store}
-	mux.HandleFunc("/v1/token-tracker/status", h.handleStatus)
-	mux.HandleFunc("/v1/token-tracker/stats", h.handleStats)
-	mux.HandleFunc("/v1/token-tracker/addresses", h.handleAddresses)
-	mux.HandleFunc("/v1/token-tracker/address/", h.handleAddress)
-	mux.HandleFunc("/v1/token-tracker/holders/", h.handleHolders)
-	mux.HandleFunc("/v1/token-tracker/blocks", h.handleBlocks)
-	mux.HandleFunc("/v1/token-tracker/tokens", h.handleTokens)
-	mux.HandleFunc("/v1/token-tracker/transfers/", h.handleTransfers)
+	// "/v1/indexer" is the legacy prefix from before the token-tracker rename;
+	// deployed frontends still call it.
+	for _, p := range []string{"/v1/token-tracker", "/v1/indexer"} {
+		mux.HandleFunc(p+"/status", h.handleStatus)
+		mux.HandleFunc(p+"/stats", h.handleStats)
+		mux.HandleFunc(p+"/addresses", h.handleAddresses)
+		mux.HandleFunc(p+"/address/", h.handleAddress)
+		mux.HandleFunc(p+"/holders/", h.handleHolders)
+		mux.HandleFunc(p+"/blocks", h.handleBlocks)
+		mux.HandleFunc(p+"/producers", h.handleProducers)
+		mux.HandleFunc(p+"/tokens", h.handleTokens)
+		mux.HandleFunc(p+"/transfers/", h.handleTransfers)
+	}
 	mux.HandleFunc("/openapi.json", h.handleOpenAPI)
 	mux.HandleFunc("/docs", h.handleDocs)
 	mux.HandleFunc("/", h.handleRoot)

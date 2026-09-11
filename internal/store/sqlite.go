@@ -375,27 +375,41 @@ func (s *SQLiteStore) DeleteTransfersAtHeight(height uint64) error {
 	return nil
 }
 
-func (s *SQLiteStore) GetTransfersByAddress(address string, limit, offset int) ([]Transfer, int, error) {
-	// Fast approximate count: sum of from + to counts (may double-count self-transfers, rare)
+func (s *SQLiteStore) GetTransfersByAddress(address string, limit, offset int) ([]Transfer, int, bool, error) {
+	// Capped counts: a full COUNT(*) for a busy address (mining wallets have
+	// millions of reward rows) wedges the DB and times out the whole API.
+	// When either side hits the cap, total is a lower bound (capped=true).
+	const countCap = 10001
 	var fromCount, toCount int
-	if err := s.exec().QueryRow("SELECT COUNT(*) FROM transfers WHERE from_addr = ?", address).Scan(&fromCount); err != nil {
-		return nil, 0, fmt.Errorf("count from transfers: %w", err)
+	if err := s.exec().QueryRow(
+		"SELECT COUNT(*) FROM (SELECT 1 FROM transfers WHERE from_addr = ? LIMIT ?)", address, countCap,
+	).Scan(&fromCount); err != nil {
+		return nil, 0, false, fmt.Errorf("count from transfers: %w", err)
 	}
-	if err := s.exec().QueryRow("SELECT COUNT(*) FROM transfers WHERE to_addr = ?", address).Scan(&toCount); err != nil {
-		return nil, 0, fmt.Errorf("count to transfers: %w", err)
+	if err := s.exec().QueryRow(
+		"SELECT COUNT(*) FROM (SELECT 1 FROM transfers WHERE to_addr = ? LIMIT ?)", address, countCap,
+	).Scan(&toCount); err != nil {
+		return nil, 0, false, fmt.Errorf("count to transfers: %w", err)
 	}
 	total := fromCount + toCount
+	capped := fromCount >= countCap || toCount >= countCap
 
+	// Pull only the newest limit+offset rows per side (index-served, stops
+	// early) before merging — the old plain UNION materialized every row for
+	// the address. UNION (not ALL) still dedups self-transfers. id is the
+	// rowid alias, so "height DESC, id DESC" is the exact reverse-index-scan
+	// order of idx_transfers_from/to — deterministic ties, no sort step.
+	per := limit + offset
 	rows, err := s.exec().Query(
 		`SELECT id, height, tx_id, token, from_addr, to_addr, value, event_type, timestamp FROM (
-			SELECT * FROM transfers WHERE from_addr = ?
+			SELECT * FROM (SELECT * FROM transfers WHERE from_addr = ? ORDER BY height DESC, id DESC LIMIT ?)
 			UNION
-			SELECT * FROM transfers WHERE to_addr = ?
+			SELECT * FROM (SELECT * FROM transfers WHERE to_addr = ? ORDER BY height DESC, id DESC LIMIT ?)
 		) ORDER BY height DESC, id DESC LIMIT ? OFFSET ?`,
-		address, address, limit, offset,
+		address, per, address, per, limit, offset,
 	)
 	if err != nil {
-		return nil, 0, fmt.Errorf("get transfers by address: %w", err)
+		return nil, 0, false, fmt.Errorf("get transfers by address: %w", err)
 	}
 	defer rows.Close()
 
@@ -403,11 +417,11 @@ func (s *SQLiteStore) GetTransfersByAddress(address string, limit, offset int) (
 	for rows.Next() {
 		var t Transfer
 		if err := rows.Scan(&t.ID, &t.Height, &t.TxID, &t.Token, &t.From, &t.To, &t.Value, &t.EventType, &t.Timestamp); err != nil {
-			return nil, 0, fmt.Errorf("scan transfer: %w", err)
+			return nil, 0, false, fmt.Errorf("scan transfer: %w", err)
 		}
 		transfers = append(transfers, t)
 	}
-	return transfers, total, rows.Err()
+	return transfers, total, capped, rows.Err()
 }
 
 func (s *SQLiteStore) GetTransfersByToken(token string, limit, offset int) ([]Transfer, int, error) {
@@ -439,6 +453,119 @@ func (s *SQLiteStore) GetTransfersByToken(token string, limit, offset int) ([]Tr
 		transfers = append(transfers, t)
 	}
 	return transfers, total, rows.Err()
+}
+
+// GetRecentTransfers returns the latest transfers across all addresses,
+// newest first. Ordered by rowid, which follows chain insertion order.
+func (s *SQLiteStore) GetRecentTransfers(limit int) ([]Transfer, error) {
+	rows, err := s.exec().Query(
+		`SELECT id, height, tx_id, token, from_addr, to_addr, value, event_type, timestamp
+		 FROM transfers ORDER BY id DESC LIMIT ?`, limit,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("get recent transfers: %w", err)
+	}
+	defer rows.Close()
+
+	transfers := make([]Transfer, 0)
+	for rows.Next() {
+		var t Transfer
+		if err := rows.Scan(&t.ID, &t.Height, &t.TxID, &t.Token, &t.From, &t.To, &t.Value, &t.EventType, &t.Timestamp); err != nil {
+			return nil, fmt.Errorf("scan transfer: %w", err)
+		}
+		transfers = append(transfers, t)
+	}
+	return transfers, rows.Err()
+}
+
+// GetProducers returns every address that produced a block in the last
+// windowBlocks blocks or holds VHP, with 24h block counts and the timestamp
+// of their most recent block. Second return is the total block count in the
+// window. Per-signer MAX(height) is index-only via idx_blocks_signer
+// (height is the rowid), so this stays fast on a full-history blocks table.
+func (s *SQLiteStore) GetProducers(windowBlocks uint64) ([]Producer, int, error) {
+	var head uint64
+	if err := s.exec().QueryRow("SELECT COALESCE(MAX(height), 0) FROM blocks").Scan(&head); err != nil {
+		return nil, 0, fmt.Errorf("get head height: %w", err)
+	}
+	var since uint64
+	if head > windowBlocks {
+		since = head - windowBlocks
+	}
+
+	type entry struct {
+		vhp    string
+		blocks int
+	}
+	entries := make(map[string]*entry)
+
+	// NOT INDEXED: the planner otherwise full-scans the 37M-entry signer index
+	// for the GROUP BY instead of range-scanning ~29k rows via the height PK
+	// (2.3s vs 0.2s measured).
+	rows, err := s.exec().Query(
+		"SELECT signer, COUNT(*) FROM blocks NOT INDEXED WHERE height > ? AND signer != '' GROUP BY signer", since,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("get producers blocks: %w", err)
+	}
+	total := 0
+	for rows.Next() {
+		var signer string
+		var n int
+		if err := rows.Scan(&signer, &n); err != nil {
+			rows.Close()
+			return nil, 0, fmt.Errorf("scan producer: %w", err)
+		}
+		entries[signer] = &entry{vhp: "0", blocks: n}
+		total += n
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate producers: %w", err)
+	}
+
+	rows, err = s.exec().Query(
+		"SELECT address, balance FROM balances WHERE token = ? AND balance != '0'", s.vhpContract,
+	)
+	if err != nil {
+		return nil, 0, fmt.Errorf("count vhp holders: %w", err)
+	}
+	for rows.Next() {
+		var addr, bal string
+		if err := rows.Scan(&addr, &bal); err != nil {
+			rows.Close()
+			return nil, 0, fmt.Errorf("scan vhp holder: %w", err)
+		}
+		if e, ok := entries[addr]; ok {
+			e.vhp = bal
+		} else {
+			entries[addr] = &entry{vhp: bal}
+		}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, 0, fmt.Errorf("iterate vhp holders: %w", err)
+	}
+
+	producers := make([]Producer, 0, len(entries))
+	for addr, e := range entries {
+		p := Producer{Address: addr, VhpBalance: e.vhp, Blocks24h: e.blocks}
+		var lastHeight uint64
+		if err := s.exec().QueryRow(
+			"SELECT COALESCE(MAX(height), 0) FROM blocks WHERE signer = ?", addr,
+		).Scan(&lastHeight); err != nil {
+			return nil, 0, fmt.Errorf("get last block: %w", err)
+		}
+		if lastHeight > 0 {
+			if err := s.exec().QueryRow(
+				"SELECT timestamp FROM blocks WHERE height = ?", lastHeight,
+			).Scan(&p.LastBlockTime); err != nil {
+				return nil, 0, fmt.Errorf("get last block time: %w", err)
+			}
+		}
+		producers = append(producers, p)
+	}
+	return producers, total, nil
 }
 
 func (s *SQLiteStore) GetStats() (*Stats, error) {

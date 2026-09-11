@@ -55,6 +55,7 @@ CREATE INDEX IF NOT EXISTS idx_transfers_from ON transfers(from_addr, height DES
 CREATE INDEX IF NOT EXISTS idx_transfers_to ON transfers(to_addr, height DESC);
 CREATE INDEX IF NOT EXISTS idx_transfers_token ON transfers(token, height DESC);
 CREATE INDEX IF NOT EXISTS idx_transfers_height ON transfers(height);
+CREATE INDEX IF NOT EXISTS idx_blocks_signer ON blocks(signer);
 
 INSERT OR IGNORE INTO sync_state (id, last_height, last_block_id, updated_at) VALUES (1, 0, '', 0);
 `

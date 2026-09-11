@@ -303,18 +303,53 @@ func (h *handlers) handleTransfers(w http.ResponseWriter, r *http.Request) {
 		limit = 500
 	}
 
-	transfers, total, err := h.store.GetTransfersByAddress(query, limit, offset)
+	// "recent" is not a valid base58 address, so it can't shadow a real one
+	if query == "recent" {
+		transfers, err := h.store.GetRecentTransfers(limit)
+		if err != nil {
+			internalError(w, err)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]interface{}{
+			"limit":     limit,
+			"transfers": transfers,
+		})
+		return
+	}
+
+	transfers, total, capped, err := h.store.GetTransfersByAddress(query, limit, offset)
 	if err != nil {
 		internalError(w, err)
 		return
 	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"query":     query,
-		"total":     total,
-		"limit":     limit,
-		"offset":    offset,
-		"transfers": transfers,
+		"query":        query,
+		"total":        total,
+		"total_capped": capped,
+		"limit":        limit,
+		"offset":       offset,
+		"transfers":    transfers,
+	})
+}
+
+// GET /v1/token-tracker/producers
+func (h *handlers) handleProducers(w http.ResponseWriter, r *http.Request) {
+	if r.Method != "GET" {
+		writeError(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+
+	// 24h at 3s block time
+	producers, total, err := h.store.GetProducers(28800)
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"producers":    producers,
+		"total_blocks": total,
 	})
 }
 

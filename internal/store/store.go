@@ -31,8 +31,12 @@ type Store interface {
 	InsertTransfer(height uint64, txID, token, fromAddr, toAddr, value, eventType string, timestamp uint64) error
 	DeleteTransfersAtHeight(height uint64) error
 	ResetTokenBalances(token string) error
-	GetTransfersByAddress(address string, limit, offset int) ([]Transfer, int, error)
+	GetTransfersByAddress(address string, limit, offset int) ([]Transfer, int, bool, error)
 	GetTransfersByToken(token string, limit, offset int) ([]Transfer, int, error)
+	GetRecentTransfers(limit int) ([]Transfer, error)
+
+	// Producers
+	GetProducers(windowBlocks uint64) ([]Producer, int, error)
 
 	// Stats
 	GetStats() (*Stats, error)
@@ -88,6 +92,14 @@ type Transfer struct {
 	Value     string `json:"value"`
 	EventType string `json:"event_type"` // transfer, mint, burn
 	Timestamp uint64 `json:"timestamp"`
+}
+
+// Producer is a block producer (or VHP holder) with recent activity stats.
+type Producer struct {
+	Address       string `json:"address"`
+	VhpBalance    string `json:"vhp_balance"`
+	Blocks24h     int    `json:"blocks_24h"`
+	LastBlockTime uint64 `json:"last_block_time"` // ms, 0 = never produced
 }
 
 // Stats holds aggregate statistics.
