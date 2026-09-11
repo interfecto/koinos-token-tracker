@@ -652,7 +652,11 @@ func (s *SQLiteStore) ConvertHexTxIDs(token string, conv func(string) (string, e
 		}
 		todo = append(todo, r)
 	}
+	err = rows.Err()
 	rows.Close()
+	if err != nil {
+		return 0, fmt.Errorf("hex tx ids: %w", err)
+	}
 	for i, r := range todo {
 		id, err := conv(r.txID)
 		if err != nil {
