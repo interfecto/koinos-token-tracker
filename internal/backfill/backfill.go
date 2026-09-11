@@ -22,6 +22,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -323,6 +324,22 @@ func (c *Client) blockOf(ctx context.Context, txID string) (blockInfo, error) {
 
 // --- history → ops ---------------------------------------------------------
 
+var hexTxID = regexp.MustCompile(`^0x1220[0-9a-fA-F]{64}$`)
+
+// TxIDBase58 converts a transaction id as koinos-rest prints it (0x-hex of
+// the SHA-256 multihash) to the base58 form the live block processor stores
+// (base58 of the same bytes), so backfilled rows look exactly like live ones.
+func TxIDBase58(id string) (string, error) {
+	if !hexTxID.MatchString(id) {
+		return "", fmt.Errorf("transaction id %q is not a 0x1220… multihash", id)
+	}
+	raw, err := hex.DecodeString(id[2:])
+	if err != nil {
+		return "", fmt.Errorf("transaction id %q: %w", id, err)
+	}
+	return base58.Encode(raw), nil
+}
+
 func parseSeq(s string) uint64 {
 	if s == "" {
 		return 0 // the first entry omits seq_num
@@ -479,7 +496,14 @@ func opsOf(token string, seq uint64, b blockInfo, txID string, events []event) (
 				continue
 			}
 		}
-		ops = append(ops, Op{Seq: seq, Height: b.height, Timestamp: b.timestamp, TxID: txID, EventType: typ, From: from, To: to, Value: value})
+		id := ""
+		if txID != "" {
+			var err error
+			if id, err = TxIDBase58(txID); err != nil {
+				return nil, fmt.Errorf("seq %d: %w", seq, err)
+			}
+		}
+		ops = append(ops, Op{Seq: seq, Height: b.height, Timestamp: b.timestamp, TxID: id, EventType: typ, From: from, To: to, Value: value})
 	}
 	return ops, nil
 }

@@ -1,6 +1,7 @@
 package store
 
 import (
+	"fmt"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -208,5 +209,38 @@ func TestRecentTransfersOrderedByHeightNotRowid(t *testing.T) {
 		if strings.Contains(detail, "TEMP B-TREE") {
 			t.Fatalf("recent transfers must be served by idx_transfers_height, not a sort: %s", detail)
 		}
+	}
+}
+
+func TestConvertHexTxIDsOnlyTouchesHexRowsOfTheToken(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "c.db"), "1KNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "1VHPyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	const a, b = "1TKNxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "1OTHERyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+	for _, r := range [][3]string{{a, "0xaa", "transfer"}, {a, "QmAlreadyBase58", "transfer"}, {a, "", "mint"}, {b, "0xbb", "transfer"}} {
+		if err := s.InsertTransfer(1, r[1], r[0], "x", "y", "1", r[2], 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	n, err := s.ConvertHexTxIDs(a, func(id string) (string, error) { return "conv-" + id, nil })
+	if err != nil || n != 1 {
+		t.Fatalf("n=%d err=%v", n, err)
+	}
+	rows, _ := s.GetRecentTransfersFiltered(a, "transfer", 10)
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.TxID] = true
+	}
+	if !got["conv-0xaa"] || !got["QmAlreadyBase58"] || len(rows) != 2 {
+		t.Fatalf("rows after conversion: %+v", rows)
+	}
+	other, _ := s.GetRecentTransfersFiltered(b, "transfer", 10)
+	if len(other) != 1 || other[0].TxID != "0xbb" {
+		t.Fatalf("other token must be untouched: %+v", other)
+	}
+	if _, err := s.ConvertHexTxIDs(b, func(string) (string, error) { return "", fmt.Errorf("nope") }); err == nil {
+		t.Fatal("conversion errors must surface")
 	}
 }

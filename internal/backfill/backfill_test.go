@@ -3,6 +3,7 @@ package backfill
 import (
 	"context"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -451,7 +452,7 @@ func TestOpsOfRejectsGarbage(t *testing.T) {
 		raw(ev(tok, "koinos.contracts.token.approve_event", map[string]string{"from": alfa, "to": beta, "value": "5"})),  // not a balance event
 		raw(ev(tok, "koinos.contracts.token.transfer_event", map[string]string{"from": alfa, "to": beta, "value": "7"})),
 	}
-	ops, err := opsOf(tok, 1, b, "0x1220", ok)
+	ops, err := opsOf(tok, 1, b, txID(1), ok)
 	if err != nil || len(ops) != 1 || ops[0].Value != 7 {
 		t.Fatalf("ops %+v %v", ops, err)
 	}
@@ -568,5 +569,25 @@ func TestReferenceHistoryUnavailableIsNotDone(t *testing.T) {
 	}
 	if bf, _ := s.GetBackfill(tok); bf.Done || bf.NextSeq != 2 {
 		t.Fatalf("progress %+v", bf)
+	}
+}
+
+func TestBackfilledTxIDsUseTheLiveBase58Form(t *testing.T) {
+	srv := newServer(t, &fakeREST{entries: fixture(), pageLimit: 100})
+	s := newStore(t)
+	register(t, s, 200)
+	if _, err := Run(context.Background(), s, srv.URL, "", tok, refAcct); err != nil {
+		t.Fatal(err)
+	}
+	rows, err := s.GetRecentTransfersFiltered(tok, "transfer", 10)
+	if err != nil || len(rows) != 1 {
+		t.Fatalf("rows %v %v", rows, err)
+	}
+	raw, _ := hex.DecodeString(txID(1)[2:])
+	if want := base58.Encode(raw); rows[0].TxID != want {
+		t.Fatalf("tx id stored as %q, want the live processor's base58 form %q", rows[0].TxID, want)
+	}
+	if _, err := TxIDBase58("0x1220zz"); err == nil {
+		t.Fatal("malformed id must be rejected")
 	}
 }

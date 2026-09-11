@@ -41,6 +41,9 @@ type Store interface {
 	GetTransfersByToken(token string, limit, offset int) ([]Transfer, int, error)
 	GetRecentTransfers(limit int) ([]Transfer, error)
 	GetRecentTransfersFiltered(token, eventType string, limit int) ([]Transfer, error)
+	// ConvertHexTxIDs rewrites this token's transfer rows whose tx_id is still
+	// 0x-hex (written by the first backfill build) with conv; returns the count.
+	ConvertHexTxIDs(token string, conv func(string) (string, error)) (int, error)
 
 	// Producers
 	GetProducers(windowBlocks uint64) ([]Producer, int, error)

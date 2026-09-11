@@ -631,6 +631,40 @@ const RecentFilterTimeout = 5 * time.Second
 // (token, height DESC) from the top until limit rows match, so even KOIN —
 // where block-reward mints outnumber real transfers roughly a thousand to
 // one — answers in milliseconds.
+// ConvertHexTxIDs rewrites the token's transfer rows with a 0x-hex tx_id
+// (as the first backfill build stored them) to conv(tx_id). The rows are read
+// completely before the first write: the store runs on one connection.
+func (s *SQLiteStore) ConvertHexTxIDs(token string, conv func(string) (string, error)) (int, error) {
+	rows, err := s.exec().Query("SELECT id, tx_id FROM transfers WHERE token = ? AND tx_id LIKE '0x%'", token)
+	if err != nil {
+		return 0, fmt.Errorf("hex tx ids: %w", err)
+	}
+	type row struct {
+		id   int64
+		txID string
+	}
+	var todo []row
+	for rows.Next() {
+		var r row
+		if err := rows.Scan(&r.id, &r.txID); err != nil {
+			rows.Close()
+			return 0, fmt.Errorf("hex tx ids: %w", err)
+		}
+		todo = append(todo, r)
+	}
+	rows.Close()
+	for i, r := range todo {
+		id, err := conv(r.txID)
+		if err != nil {
+			return i, err
+		}
+		if _, err := s.exec().Exec("UPDATE transfers SET tx_id = ? WHERE id = ?", id, r.id); err != nil {
+			return i, fmt.Errorf("update tx id: %w", err)
+		}
+	}
+	return len(todo), nil
+}
+
 func (s *SQLiteStore) GetRecentTransfersFiltered(token, eventType string, limit int) ([]Transfer, error) {
 	if token == "" {
 		return nil, fmt.Errorf("get recent transfers filtered: token is required")

@@ -198,6 +198,7 @@ func main() {
 	// meanwhile; block sync waits — and keeps waiting while a replay fails,
 	// retrying every minute, because syncing past the cutoff with an
 	// incomplete replay would corrupt balances permanently.
+	repairBackfilledTxIDs(db)
 	for {
 		err := runBackfills(ctx, db, *restURL, *restFallback, *rpcURL, cfg.KoinContract)
 		if err == nil {
@@ -392,6 +393,37 @@ func loadExtraTokens(db *store.SQLiteStore, cfg *config.TokenTrackerConfig) ([]s
 	}
 	cfg.SetExtraTokens(extras)
 	return extras, nil
+}
+
+// repairBackfilledTxIDs rewrites transfer rows of tracked tokens whose tx_id
+// the first backfill build stored as 0x-hex into the base58 form the live
+// processor uses (one-off; nothing to do afterwards). A failure is logged,
+// not fatal: the rows stay readable, only in the other notation.
+func repairBackfilledTxIDs(db *store.SQLiteStore) {
+	recs, err := db.ListBackfills()
+	if err != nil {
+		log.Errorf("Tx id repair: %v", err)
+		return
+	}
+	for _, bf := range recs {
+		if err := db.BeginBatch(); err != nil {
+			log.Errorf("Tx id repair %s: %v", bf.Token, err)
+			return
+		}
+		n, err := db.ConvertHexTxIDs(bf.Token, backfill.TxIDBase58)
+		if err != nil {
+			db.RollbackBatch()
+			log.Errorf("Tx id repair %s: %v", bf.Token, err)
+			continue
+		}
+		if err := db.CommitBatch(); err != nil {
+			log.Errorf("Tx id repair %s: %v", bf.Token, err)
+			continue
+		}
+		if n > 0 {
+			log.Infof("Tx id repair %s: %d transfer rows rewritten to base58", bf.Token, n)
+		}
+	}
 }
 
 // runBackfills replays the history of every token whose backfill is not done
