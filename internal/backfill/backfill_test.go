@@ -137,7 +137,7 @@ func TestRunAppliesHistoryUpToCutoff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res, err := Run(context.Background(), s, srv.URL, tok)
+	res, err := Run(context.Background(), s, srv.URL, "", tok)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +170,7 @@ func TestRunAppliesHistoryUpToCutoff(t *testing.T) {
 
 	// a second run is a no-op: nothing double-counted, no REST calls
 	before := calls.Load()
-	res, err = Run(context.Background(), s, srv.URL, tok)
+	res, err = Run(context.Background(), s, srv.URL, "", tok)
 	if err != nil || !res.Done || calls.Load() != before {
 		t.Fatalf("second run: %+v err=%v calls=%d→%d", res, err, before, calls.Load())
 	}
@@ -190,7 +190,7 @@ func TestRunResumesAfterFailure(t *testing.T) {
 	if err := s.UpsertBackfill(&store.Backfill{Token: tok, NextSeq: 0, CutoffHeight: 0}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := Run(context.Background(), s, srv.URL, tok); err == nil {
+	if _, err := Run(context.Background(), s, srv.URL, "", tok); err == nil {
 		t.Fatal("expected the injected failure")
 	}
 	bf, _ := s.GetBackfill(tok)
@@ -200,7 +200,7 @@ func TestRunResumesAfterFailure(t *testing.T) {
 	if balance(t, s, alfa) != "70" || balance(t, s, beta) != "30" { // first page applied: mint 100, transfer 30
 		t.Fatalf("partial balances alfa=%s beta=%s", balance(t, s, alfa), balance(t, s, beta))
 	}
-	res, err := Run(context.Background(), s, srv.URL, tok)
+	res, err := Run(context.Background(), s, srv.URL, "", tok)
 	if err != nil || !res.Done {
 		t.Fatalf("resume: %+v %v", res, err)
 	}
@@ -218,7 +218,7 @@ func TestDryRunMatchesRun(t *testing.T) {
 	var calls atomic.Int64
 	srv := server(t, fixture(), 100, 0, &calls)
 	defer srv.Close()
-	balances, res, err := DryRun(context.Background(), srv.URL, tok, 0)
+	balances, res, err := DryRun(context.Background(), srv.URL, "", tok, 0)
 	if err != nil || !res.Done || res.Ops != 5 {
 		t.Fatalf("dry run %+v %v", res, err)
 	}
@@ -229,7 +229,7 @@ func TestDryRunMatchesRun(t *testing.T) {
 
 func TestRunRequiresRegistration(t *testing.T) {
 	s := newStore(t)
-	if _, err := Run(context.Background(), s, "http://127.0.0.1:1", tok); err != ErrNotRegistered {
+	if _, err := Run(context.Background(), s, "http://127.0.0.1:1", "", tok); err != ErrNotRegistered {
 		t.Fatalf("expected ErrNotRegistered, got %v", err)
 	}
 }
@@ -251,5 +251,43 @@ func TestOpsOfRejectsGarbage(t *testing.T) {
 	ops := opsOf(tok, 1, b, "0x1220", events)
 	if len(ops) != 1 || ops[0].Value != 7 {
 		t.Fatalf("ops %+v", ops)
+	}
+}
+
+// The primary node answers 500 for one transaction (a transaction store gap);
+// the fallback node resolves it and the run completes with correct heights.
+func TestFallbackNodeResolvesTransaction(t *testing.T) {
+	var calls, fallbackCalls atomic.Int64
+	good := server(t, fixture(), 100, 0, &fallbackCalls)
+	defer good.Close()
+	broken := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		calls.Add(1)
+		if strings.HasPrefix(r.URL.Path, "/v1/transaction/") && strings.HasSuffix(r.URL.Path, fmt.Sprintf("%064x", 2)) {
+			http.Error(w, `{"error":"unknown error"}`, 500)
+			return
+		}
+		http.Redirect(w, r, good.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	defer broken.Close()
+	s := newStore(t)
+	if err := s.UpsertBackfill(&store.Backfill{Token: tok, NextSeq: 0, CutoffHeight: 0}); err != nil {
+		t.Fatal(err)
+	}
+	res, err := Run(context.Background(), s, broken.URL, good.URL, tok)
+	if err != nil || !res.Done || res.Ops != 5 {
+		t.Fatalf("run with fallback: %+v %v", res, err)
+	}
+	if fallbackCalls.Load() == 0 {
+		t.Fatal("fallback node was never asked")
+	}
+	rows, _ := s.GetRecentTransfersFiltered(tok, "burn", 5)
+	if len(rows) != 1 || rows[0].Height != 105 {
+		t.Fatalf("burn row should carry the fallback-resolved height: %+v", rows)
+	}
+	// without a fallback the same gap is fatal but resumable
+	s2 := newStore(t)
+	_ = s2.UpsertBackfill(&store.Backfill{Token: tok, NextSeq: 0, CutoffHeight: 0})
+	if _, err := Run(context.Background(), s2, broken.URL, "", tok); err == nil {
+		t.Fatal("expected failure without a fallback node")
 	}
 }

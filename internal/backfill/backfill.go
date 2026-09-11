@@ -64,18 +64,22 @@ type Result struct {
 	StoppedAt uint64 // first height above the cutoff, 0 when history was exhausted
 }
 
-// Client reads koinos-rest.
+// Client reads koinos-rest. Block lookups fall back to a second node when
+// the primary cannot serve a transaction (a node's transaction store may
+// lack an old transaction its account history still references).
 type Client struct {
-	rest   string
-	http   *http.Client
-	blocks map[string]blockInfo
+	rest     string
+	fallback string
+	http     *http.Client
+	blocks   map[string]blockInfo
 }
 
 type blockInfo struct{ height, timestamp uint64 }
 
-// NewClient talks to a koinos-rest base URL such as http://127.0.0.1:3000.
-func NewClient(restURL string) *Client {
-	return &Client{rest: strings.TrimRight(restURL, "/"), http: &http.Client{Timeout: httpTimeout}, blocks: make(map[string]blockInfo)}
+// NewClient talks to a koinos-rest base URL such as http://127.0.0.1:3000;
+// fallbackURL (may be empty) is asked when the primary fails a lookup.
+func NewClient(restURL, fallbackURL string) *Client {
+	return &Client{rest: strings.TrimRight(restURL, "/"), fallback: strings.TrimRight(fallbackURL, "/"), http: &http.Client{Timeout: httpTimeout}, blocks: make(map[string]blockInfo)}
 }
 
 // --- wire shapes (only the fields we read) --------------------------------
@@ -129,6 +133,23 @@ type blockResponse struct {
 // --- REST access ----------------------------------------------------------
 
 func (c *Client) getJSON(ctx context.Context, path string, out interface{}) error {
+	return c.getJSONFrom(ctx, c.rest, path, out)
+}
+
+// getJSONOrFallback tries the primary node, then the fallback node.
+func (c *Client) getJSONOrFallback(ctx context.Context, path string, out interface{}) error {
+	err := c.getJSONFrom(ctx, c.rest, path, out)
+	if err == nil || c.fallback == "" || ctx.Err() != nil {
+		return err
+	}
+	log.Warnf("Backfill: primary node failed %s (%v), trying %s", path, err, c.fallback)
+	if ferr := c.getJSONFrom(ctx, c.fallback, path, out); ferr != nil {
+		return fmt.Errorf("primary: %v; fallback: %w", err, ferr)
+	}
+	return nil
+}
+
+func (c *Client) getJSONFrom(ctx context.Context, base, path string, out interface{}) error {
 	var lastErr error
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		if attempt > 0 {
@@ -138,7 +159,7 @@ func (c *Client) getJSON(ctx context.Context, path string, out interface{}) erro
 			case <-time.After(time.Duration(attempt) * 700 * time.Millisecond):
 			}
 		}
-		req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.rest+path, nil)
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, base+path, nil)
 		if err != nil {
 			return err
 		}
@@ -184,7 +205,7 @@ func (c *Client) History(ctx context.Context, token string, seq uint64, limit in
 // blockOf resolves the height and timestamp of the block containing a transaction.
 func (c *Client) blockOf(ctx context.Context, txID string) (blockInfo, error) {
 	var tx txResponse
-	if err := c.getJSON(ctx, "/v1/transaction/"+url.PathEscape(txID)+"?return_receipt=false", &tx); err != nil {
+	if err := c.getJSONOrFallback(ctx, "/v1/transaction/"+url.PathEscape(txID)+"?return_receipt=false", &tx); err != nil {
 		return blockInfo{}, err
 	}
 	if len(tx.ContainingBlocks) == 0 {
@@ -195,7 +216,7 @@ func (c *Client) blockOf(ctx context.Context, txID string) (blockInfo, error) {
 		return b, nil
 	}
 	var br blockResponse
-	if err := c.getJSON(ctx, "/v1/block/"+url.PathEscape(id), &br); err != nil {
+	if err := c.getJSONOrFallback(ctx, "/v1/block/"+url.PathEscape(id), &br); err != nil {
 		return blockInfo{}, err
 	}
 	h, err := strconv.ParseUint(br.BlockHeight, 10, 64)
@@ -336,7 +357,7 @@ func (c *Client) Collect(ctx context.Context, token string, seq uint64, cutoff u
 var ErrNotRegistered = errors.New("token has no backfill record")
 
 // Run resumes (or starts) the backfill of one token and applies it to the store.
-func Run(ctx context.Context, s store.Store, restURL, token string) (*Result, error) {
+func Run(ctx context.Context, s store.Store, restURL, fallbackURL, token string) (*Result, error) {
 	bf, err := s.GetBackfill(token)
 	if err != nil {
 		return nil, err
@@ -349,7 +370,7 @@ func Run(ctx context.Context, s store.Store, restURL, token string) (*Result, er
 		res.Done = true
 		return res, nil
 	}
-	c := NewClient(restURL)
+	c := NewClient(restURL, fallbackURL)
 	seq := bf.NextSeq
 	started := time.Now()
 	for {
@@ -449,8 +470,8 @@ func apply(s store.Store, token string, ops []Op, progress *store.Backfill) erro
 // DryRun replays the whole history without touching any database and returns
 // the balances it would produce, for checking against the chain before a
 // token is registered. cutoff 0 means "all of it".
-func DryRun(ctx context.Context, restURL, token string, cutoff uint64) (map[string]*big.Int, *Result, error) {
-	c := NewClient(restURL)
+func DryRun(ctx context.Context, restURL, fallbackURL, token string, cutoff uint64) (map[string]*big.Int, *Result, error) {
+	c := NewClient(restURL, fallbackURL)
 	balances := make(map[string]*big.Int)
 	res := &Result{}
 	add := func(addr string, delta int64) {

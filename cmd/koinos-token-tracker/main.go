@@ -56,6 +56,7 @@ func main() {
 		configPath    = flag.StringP("config", "c", "", "Path to Koinos node config.yml (token addresses and migration height)")
 		trackTokens   = flag.StringSlice("track-token", nil, "Token contract to index in addition to KOIN/VHP (repeatable; remembered in the database, history backfilled from the REST node on the next start)")
 		dryRunToken   = flag.String("backfill-dry-run", "", "Replay a token's history from the REST node without touching any database, compare the resulting balances with the chain and exit")
+		restFallback  = flag.String("rest-fallback-url", "https://api.koinos.io", "Second REST node asked when the primary cannot serve a transaction or block during a history backfill (empty = none)")
 	)
 
 	flag.Parse()
@@ -106,7 +107,7 @@ func main() {
 	}
 
 	if *dryRunToken != "" {
-		os.Exit(runBackfillDryRun(*dryRunToken, *restURL))
+		os.Exit(runBackfillDryRun(*dryRunToken, *restURL, *restFallback))
 	}
 
 	if *apiOnly && *reset {
@@ -202,7 +203,7 @@ func main() {
 	// Pending history backfills run beside the live sync: pages are applied in
 	// batches that take the store's batch lock in turn with block processing,
 	// and balance deltas commute, so both writers converge on the same state.
-	go runBackfills(ctx, db, *restURL)
+	go runBackfills(ctx, db, *restURL, *restFallback)
 
 	// -----------------------------------------------------------------------
 	// Balance reconciliation (optional, fixes VHP migration gap)
@@ -356,7 +357,7 @@ func loadExtraTokens(db *store.SQLiteStore, cfg *config.TokenTrackerConfig) ([]s
 
 // runBackfills imports the history of every token whose backfill is not done
 // yet, one token at a time, then checks the result against the chain.
-func runBackfills(ctx context.Context, db *store.SQLiteStore, restURL string) {
+func runBackfills(ctx context.Context, db *store.SQLiteStore, restURL, fallbackURL string) {
 	pending, err := db.ListBackfills()
 	if err != nil {
 		log.Errorf("Backfill: %v", err)
@@ -367,7 +368,7 @@ func runBackfills(ctx context.Context, db *store.SQLiteStore, restURL string) {
 			continue
 		}
 		log.Infof("Backfill %s: starting at seq %d (cutoff height %d)", bf.Token, bf.NextSeq, bf.CutoffHeight)
-		res, err := backfill.Run(ctx, db, restURL, bf.Token)
+		res, err := backfill.Run(ctx, db, restURL, fallbackURL, bf.Token)
 		if err != nil {
 			log.Errorf("Backfill %s: stopped at seq %d: %v (resumes on next start)", bf.Token, res.LastSeq, err)
 			continue
@@ -410,7 +411,7 @@ func fetchTokenInfo(restURL, addr string) (*tokenInfo, error) {
 // runBackfillDryRun replays a token's whole history in memory and compares
 // every resulting balance with the chain's balance_of. Exit code 0 when they
 // all match. Touches no database.
-func runBackfillDryRun(token, restURL string) int {
+func runBackfillDryRun(token, restURL, fallbackURL string) int {
 	if len(token) > 50 || !validBase58.MatchString(token) {
 		fmt.Fprintln(os.Stderr, "not a base58 address")
 		return 2
@@ -421,7 +422,7 @@ func runBackfillDryRun(token, restURL string) int {
 		return 2
 	}
 	start := time.Now()
-	balances, res, err := backfill.DryRun(context.Background(), restURL, token, 0)
+	balances, res, err := backfill.DryRun(context.Background(), restURL, fallbackURL, token, 0)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "dry run failed after %d entries: %v\n", res.Entries, err)
 		return 1
