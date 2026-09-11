@@ -5,16 +5,9 @@ import (
 	"testing"
 )
 
-func TestGetRecentTransfersFiltered(t *testing.T) {
-	const koin, vhp = "1KOINxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "1VHPxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-	s, err := Open(filepath.Join(t.TempDir(), "t.db"), koin, vhp)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer s.Close()
-
+func seedTransfers(t *testing.T, s *SQLiteStore, koin, vhp string) {
+	t.Helper()
 	ins := func(h uint64, token, typ string) {
-		t.Helper()
 		if err := s.InsertTransfer(h, "tx", token, "from", "to", "1", typ, h*1000); err != nil {
 			t.Fatal(err)
 		}
@@ -31,6 +24,19 @@ func TestGetRecentTransfersFiltered(t *testing.T) {
 			ins(h, vhp, "transfer")
 		}
 	}
+	if err := s.SetSyncState(50, "head"); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestGetRecentTransfersFiltered(t *testing.T) {
+	const koin, vhp = "1KNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "1VHPyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+	s, err := Open(filepath.Join(t.TempDir(), "t.db"), koin, vhp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	seedTransfers(t, s, koin, vhp)
 
 	got, err := s.GetRecentTransfersFiltered(koin, "transfer", 3)
 	if err != nil {
@@ -45,14 +51,6 @@ func TestGetRecentTransfersFiltered(t *testing.T) {
 		}
 	}
 
-	got, err = s.GetRecentTransfersFiltered("", "burn", 2)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 2 || got[0].Height != 50 || got[1].Height != 49 || got[0].Token != vhp {
-		t.Fatalf("burns: got %+v", got)
-	}
-
 	got, err = s.GetRecentTransfersFiltered(vhp, "", 3)
 	if err != nil {
 		t.Fatal(err)
@@ -62,12 +60,28 @@ func TestGetRecentTransfersFiltered(t *testing.T) {
 		t.Fatalf("vhp newest first: got %+v", got)
 	}
 
-	got, err = s.GetRecentTransfersFiltered("1NOPExxxxxxxxxxxxxxxxxxxxxxxxxxxx", "transfer", 5)
+	got, err = s.GetRecentTransfersFiltered("1NPExxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "transfer", 5)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 0 {
 		t.Fatalf("unknown token: expected no rows, got %d", len(got))
+	}
+
+	if _, err := s.GetRecentTransfersFiltered("", "transfer", 5); err == nil {
+		t.Fatal("type without token must be rejected")
+	}
+
+	// the window: only blocks >= head - window are searched
+	old := RecentFilterWindow
+	RecentFilterWindow = 15
+	defer func() { RecentFilterWindow = old }()
+	got, err = s.GetRecentTransfersFiltered(koin, "transfer", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 || got[0].Height != 50 || got[1].Height != 40 { // 30 is below 50-15
+		t.Fatalf("window: got %+v", got)
 	}
 
 	all, err := s.GetRecentTransfers(4)
@@ -76,5 +90,33 @@ func TestGetRecentTransfersFiltered(t *testing.T) {
 	}
 	if len(all) != 4 || all[0].Height != 50 {
 		t.Fatalf("unfiltered feed changed: %+v", all)
+	}
+}
+
+func TestOpenReadOnly(t *testing.T) {
+	const koin, vhp = "1KNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "1VHPyyyyyyyyyyyyyyyyyyyyyyyyyyyyy"
+	path := filepath.Join(t.TempDir(), "ro.db")
+	w, err := Open(path, koin, vhp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedTransfers(t, w, koin, vhp)
+
+	ro, err := OpenReadOnly(path, koin, vhp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	got, err := ro.GetRecentTransfersFiltered(koin, "transfer", 2)
+	if err != nil || len(got) != 2 {
+		t.Fatalf("read through ro store: %v %+v", err, got)
+	}
+	if err := ro.InsertTransfer(99, "tx", koin, "a", "b", "1", "transfer", 1); err == nil {
+		t.Fatal("write through the read-only store must fail")
+	}
+	w.Close()
+
+	if _, err := OpenReadOnly(filepath.Join(t.TempDir(), "missing.db"), koin, vhp); err == nil {
+		t.Fatal("missing database must not be created by the read-only opener")
 	}
 }

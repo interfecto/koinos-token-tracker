@@ -318,11 +318,15 @@ func (h *handlers) handleTransfers(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "invalid type (transfer, mint or burn)")
 			return
 		}
+		if eventType != "" && token == "" {
+			writeError(w, http.StatusBadRequest, "type requires token")
+			return
+		}
 		var (
 			transfers []store.Transfer
 			err       error
 		)
-		if token != "" || eventType != "" {
+		if token != "" {
 			transfers, err = h.store.GetRecentTransfersFiltered(token, eventType, limit)
 		} else {
 			transfers, err = h.store.GetRecentTransfers(limit)
@@ -337,6 +341,7 @@ func (h *handlers) handleTransfers(w http.ResponseWriter, r *http.Request) {
 		}
 		if token != "" {
 			resp["token"] = token
+			resp["window_blocks"] = store.RecentFilterWindow // filtered feeds look this far back from the sync head
 		}
 		if eventType != "" {
 			resp["type"] = eventType

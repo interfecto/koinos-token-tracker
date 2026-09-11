@@ -1,7 +1,7 @@
-# Binaries
+# Binaries (anchored: cmd/koinos-token-tracker/ is source)
 *.linux
 *-linux
-koinos-token-tracker
+/koinos-token-tracker
 debug-addr-linux
 
 # Data

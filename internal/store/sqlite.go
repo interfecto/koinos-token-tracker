@@ -1,6 +1,7 @@
 package store
 
 import (
+	"context"
 	"database/sql"
 	"fmt"
 	"os"
@@ -57,6 +58,26 @@ func Open(dbPath, koinContract, vhpContract string) (*SQLiteStore, error) {
 	return &SQLiteStore{db: db, koinContract: koinContract, vhpContract: vhpContract}, nil
 }
 
+// OpenReadOnly opens an existing database for reading only: no directory
+// creation, no migrations, no journal-mode change — nothing that needs the
+// write lock a live indexer may be holding. Meant for --api-only, which runs
+// beside the writing process (SQLite WAL permits concurrent readers).
+func OpenReadOnly(dbPath, koinContract, vhpContract string) (*SQLiteStore, error) {
+	if _, err := os.Stat(dbPath); err != nil {
+		return nil, fmt.Errorf("open read-only: %w", err)
+	}
+	db, err := sql.Open("sqlite", "file:"+dbPath+"?mode=ro&_pragma=busy_timeout(5000)")
+	if err != nil {
+		return nil, fmt.Errorf("open read-only: %w", err)
+	}
+	db.SetMaxOpenConns(1)
+	if err := db.Ping(); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("open read-only: %w", err)
+	}
+	return &SQLiteStore{db: db, koinContract: koinContract, vhpContract: vhpContract}, nil
+}
+
 // exec returns the active batch transaction if one exists, otherwise the raw db.
 func (s *SQLiteStore) exec() execer {
 	if s.tx != nil {
@@ -70,6 +91,7 @@ type execer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 	QueryRow(query string, args ...any) *sql.Row
 	Query(query string, args ...any) (*sql.Rows, error)
+	QueryContext(ctx context.Context, query string, args ...any) (*sql.Rows, error)
 }
 
 // ---------------------------------------------------------------------------
@@ -479,30 +501,51 @@ func (s *SQLiteStore) GetRecentTransfers(limit int) ([]Transfer, error) {
 	return transfers, rows.Err()
 }
 
-// GetRecentTransfersFiltered returns the newest transfers, optionally limited
-// to one token and/or one event type (transfer, mint, burn), newest first.
-// It walks idx_transfers_token (token, height DESC) from the top until limit
-// rows match, so even KOIN — where block-reward mints outnumber real
-// transfers roughly a thousand to one — answers in milliseconds.
+// RecentFilterWindow bounds GetRecentTransfersFiltered to the newest this
+// many blocks (~3.5 days at 3 s). Without a bound a token/type pair with no
+// recent matches would walk the token's entire history on the single
+// connection; within the window the worst case is a few hundred thousand
+// index rows (KOIN: ~3 rows per block). Tests shrink it.
+var RecentFilterWindow uint64 = 100_000
+
+// RecentFilterTimeout caps one filtered query. The bound that actually
+// limits work is RecentFilterWindow (the index range scanned is at most the
+// window's rows for that token); the deadline is defence in depth: the
+// driver interrupts SQLite while the query starts, and the scan loop stops
+// stepping once the context has expired.
+const RecentFilterTimeout = 5 * time.Second
+
+// GetRecentTransfersFiltered returns the newest transfers of one token,
+// optionally of one event type (transfer, mint, burn), newest first, within
+// RecentFilterWindow blocks of the sync head. It walks idx_transfers_token
+// (token, height DESC) from the top until limit rows match, so even KOIN —
+// where block-reward mints outnumber real transfers roughly a thousand to
+// one — answers in milliseconds.
 func (s *SQLiteStore) GetRecentTransfersFiltered(token, eventType string, limit int) ([]Transfer, error) {
-	where := make([]string, 0, 2)
-	args := make([]interface{}, 0, 3)
-	if token != "" {
-		where = append(where, "token = ?")
-		args = append(args, token)
+	if token == "" {
+		return nil, fmt.Errorf("get recent transfers filtered: token is required")
 	}
+	ctx, cancel := context.WithTimeout(context.Background(), RecentFilterTimeout)
+	defer cancel()
+	head, _, err := s.GetSyncState()
+	if err != nil {
+		return nil, fmt.Errorf("get recent transfers filtered: %w", err)
+	}
+	var since uint64
+	if head > RecentFilterWindow {
+		since = head - RecentFilterWindow
+	}
+	where := []string{"token = ?", "height >= ?"}
+	args := []interface{}{token, since}
 	if eventType != "" {
 		where = append(where, "event_type = ?")
 		args = append(args, eventType)
 	}
-	q := `SELECT id, height, tx_id, token, from_addr, to_addr, value, event_type, timestamp FROM transfers`
-	if len(where) > 0 {
-		q += " WHERE " + strings.Join(where, " AND ")
-	}
-	q += " ORDER BY height DESC, id DESC LIMIT ?"
+	q := `SELECT id, height, tx_id, token, from_addr, to_addr, value, event_type, timestamp FROM transfers WHERE ` +
+		strings.Join(where, " AND ") + " ORDER BY height DESC, id DESC LIMIT ?"
 	args = append(args, limit)
 
-	rows, err := s.exec().Query(q, args...)
+	rows, err := s.exec().QueryContext(ctx, q, args...)
 	if err != nil {
 		return nil, fmt.Errorf("get recent transfers filtered: %w", err)
 	}
@@ -510,6 +553,9 @@ func (s *SQLiteStore) GetRecentTransfersFiltered(token, eventType string, limit 
 
 	transfers := make([]Transfer, 0)
 	for rows.Next() {
+		if err := ctx.Err(); err != nil {
+			return nil, fmt.Errorf("get recent transfers filtered: %w", err)
+		}
 		var t Transfer
 		if err := rows.Scan(&t.ID, &t.Height, &t.TxID, &t.Token, &t.From, &t.To, &t.Value, &t.EventType, &t.Timestamp); err != nil {
 			return nil, fmt.Errorf("scan transfer: %w", err)

@@ -54,17 +54,26 @@ func (s *Server) Start(ctx context.Context) error {
 		IdleTimeout:  60 * time.Second,
 	}
 
+	shutdownDone := make(chan struct{})
+	var shutdownErr error
 	go func() {
+		defer close(shutdownDone)
 		<-ctx.Done()
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
-		s.server.Shutdown(shutdownCtx)
+		if err := s.server.Shutdown(shutdownCtx); err != nil {
+			// Draining did not finish in time: close what is left so the caller
+			// can safely release resources (the database) afterwards.
+			s.server.Close()
+			shutdownErr = fmt.Errorf("shutdown did not drain in time, remaining connections closed: %w", err)
+		}
 	}()
 
 	if err := s.server.ListenAndServe(); err != http.ErrServerClosed {
-		return err
+		return err // listen failure: the caller cancels ctx, which releases the goroutine above
 	}
-	return nil
+	<-shutdownDone // ListenAndServe returns as soon as Shutdown starts; wait for the drain
+	return shutdownErr
 }
 
 func corsMiddleware(next http.Handler) http.Handler {
