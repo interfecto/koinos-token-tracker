@@ -57,6 +57,14 @@ CREATE INDEX IF NOT EXISTS idx_transfers_token ON transfers(token, height DESC);
 CREATE INDEX IF NOT EXISTS idx_transfers_height ON transfers(height);
 CREATE INDEX IF NOT EXISTS idx_blocks_signer ON blocks(signer);
 
+CREATE TABLE IF NOT EXISTS token_backfill (
+    token         TEXT PRIMARY KEY,
+    next_seq      INTEGER NOT NULL DEFAULT 0,
+    cutoff_height INTEGER NOT NULL DEFAULT 0,
+    done          INTEGER NOT NULL DEFAULT 0,
+    updated_at    INTEGER NOT NULL DEFAULT 0
+);
+
 INSERT OR IGNORE INTO sync_state (id, last_height, last_block_id, updated_at) VALUES (1, 0, '', 0);
 `
 

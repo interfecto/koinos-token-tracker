@@ -348,6 +348,58 @@ func (s *SQLiteStore) GetToken(address string) (*Token, error) {
 	return t, nil
 }
 
+func (s *SQLiteStore) GetBackfill(token string) (*Backfill, error) {
+	b := &Backfill{}
+	var done int
+	err := s.exec().QueryRow(
+		"SELECT token, next_seq, cutoff_height, done, updated_at FROM token_backfill WHERE token = ?", token,
+	).Scan(&b.Token, &b.NextSeq, &b.CutoffHeight, &done, &b.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("get backfill: %w", err)
+	}
+	b.Done = done != 0
+	return b, nil
+}
+
+func (s *SQLiteStore) UpsertBackfill(b *Backfill) error {
+	done := 0
+	if b.Done {
+		done = 1
+	}
+	_, err := s.exec().Exec(
+		`INSERT INTO token_backfill (token, next_seq, cutoff_height, done, updated_at)
+		 VALUES (?, ?, ?, ?, ?)
+		 ON CONFLICT(token) DO UPDATE SET next_seq=excluded.next_seq, cutoff_height=excluded.cutoff_height, done=excluded.done, updated_at=excluded.updated_at`,
+		b.Token, b.NextSeq, b.CutoffHeight, done, time.Now().Unix(),
+	)
+	if err != nil {
+		return fmt.Errorf("upsert backfill: %w", err)
+	}
+	return nil
+}
+
+func (s *SQLiteStore) ListBackfills() ([]Backfill, error) {
+	rows, err := s.exec().Query("SELECT token, next_seq, cutoff_height, done, updated_at FROM token_backfill ORDER BY token")
+	if err != nil {
+		return nil, fmt.Errorf("list backfills: %w", err)
+	}
+	defer rows.Close()
+	out := make([]Backfill, 0)
+	for rows.Next() {
+		var b Backfill
+		var done int
+		if err := rows.Scan(&b.Token, &b.NextSeq, &b.CutoffHeight, &done, &b.UpdatedAt); err != nil {
+			return nil, fmt.Errorf("scan backfill: %w", err)
+		}
+		b.Done = done != 0
+		out = append(out, b)
+	}
+	return out, rows.Err()
+}
+
 func (s *SQLiteStore) GetAllTokens() ([]Token, error) {
 	rows, err := s.exec().Query("SELECT address, symbol, decimals, total_supply FROM tokens")
 	if err != nil {

@@ -18,7 +18,7 @@ func isTokenEvent(cfg *config.TokenTrackerConfig, source string) bool {
 		return false
 	}
 	return source == cfg.KoinContract || source == cfg.VhpContract ||
-		source == cfg.OldKoinContract || source == cfg.OldVhpContract
+		source == cfg.OldKoinContract || source == cfg.OldVhpContract || cfg.IsExtra(source)
 }
 
 // affectsBalance returns true for contracts whose events should update balances.
@@ -34,7 +34,7 @@ func affectsBalance(cfg *config.TokenTrackerConfig, source string, height uint64
 	case cfg.OldVhpContract:
 		return height < cfg.KCS4MigrationHeight
 	default:
-		return false
+		return cfg.IsExtra(source)
 	}
 }
 

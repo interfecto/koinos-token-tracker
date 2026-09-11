@@ -15,6 +15,29 @@ type TokenTrackerConfig struct {
 	OldKoinContract     string `yaml:"old-koin-contract"`
 	OldVhpContract      string `yaml:"old-vhp-contract"`
 	KCS4MigrationHeight uint64 `yaml:"kcs4-migration-height"`
+
+	// ExtraTokens are token contracts tracked in addition to KOIN/VHP. They
+	// come from the database's tokens table at startup (registered with
+	// --track-token), not from the YAML file; their events are indexed like
+	// KOIN's at every height, without the migration special cases.
+	ExtraTokens map[string]struct{} `yaml:"-"`
+}
+
+// IsExtra reports whether addr is an additionally tracked token contract.
+func (c *TokenTrackerConfig) IsExtra(addr string) bool {
+	_, ok := c.ExtraTokens[addr]
+	return ok
+}
+
+// SetExtraTokens replaces the extra token set; KOIN/VHP and blanks are ignored.
+func (c *TokenTrackerConfig) SetExtraTokens(addrs []string) {
+	c.ExtraTokens = make(map[string]struct{}, len(addrs))
+	for _, a := range addrs {
+		if a == "" || a == c.KoinContract || a == c.VhpContract {
+			continue
+		}
+		c.ExtraTokens[a] = struct{}{}
+	}
 }
 
 // DefaultConfig returns mainnet defaults.

@@ -2,11 +2,16 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"os"
 	"os/signal"
 	"path"
+	"regexp"
 	"runtime"
+	"strings"
 	"syscall"
 
 	"time"
@@ -14,6 +19,7 @@ import (
 	log "github.com/koinos/koinos-log-golang/v2"
 	koinosmq "github.com/koinos/koinos-mq-golang"
 	"github.com/koinos/koinos-token-tracker/internal/api"
+	"github.com/koinos/koinos-token-tracker/internal/backfill"
 	"github.com/koinos/koinos-token-tracker/internal/config"
 	"github.com/koinos/koinos-token-tracker/internal/reconcile"
 	"github.com/koinos/koinos-token-tracker/internal/store"
@@ -23,8 +29,10 @@ import (
 
 const (
 	appName    = "koinos-token-tracker"
-	appVersion = "0.2.0"
+	appVersion = "0.3.0"
 )
+
+var validBase58 = regexp.MustCompile(`^[1-9A-HJ-NP-Za-km-z]+$`)
 
 func main() {
 	// -----------------------------------------------------------------------
@@ -46,6 +54,8 @@ func main() {
 		apiOnly       = flag.Bool("api-only", false, "Serve the HTTP API from the existing database only: no AMQP, no sync, no writes (side-by-side testing)")
 		restURL       = flag.String("rest-url", "http://127.0.0.1:3000", "REST API URL for balance reconciliation")
 		configPath    = flag.StringP("config", "c", "", "Path to Koinos node config.yml (token addresses and migration height)")
+		trackTokens   = flag.StringSlice("track-token", nil, "Token contract to index in addition to KOIN/VHP (repeatable; remembered in the database, history backfilled from the REST node on the next start)")
+		dryRunToken   = flag.String("backfill-dry-run", "", "Replay a token's history from the REST node without touching any database, compare the resulting balances with the chain and exit")
 	)
 
 	flag.Parse()
@@ -95,6 +105,10 @@ func main() {
 		dbPath = legacy
 	}
 
+	if *dryRunToken != "" {
+		os.Exit(runBackfillDryRun(*dryRunToken, *restURL))
+	}
+
 	if *apiOnly && *reset {
 		log.Error("--api-only and --reset are mutually exclusive: api-only must never delete the database")
 		os.Exit(2)
@@ -127,6 +141,19 @@ func main() {
 	if err := db.UpsertToken(cfg.VhpContract, "VHP", 8, ""); err != nil {
 		log.Errorf("Failed to seed VHP token: %v", err)
 		os.Exit(1)
+	}
+
+	// Additional tokens: register the ones given on the command line, then
+	// track every token the database knows about from this run's first block.
+	if err := registerTrackedTokens(db, cfg, *restURL, *trackTokens); err != nil {
+		log.Errorf("Failed to register tracked tokens: %v", err)
+		os.Exit(1)
+	}
+	if extras, err := loadExtraTokens(db, cfg); err != nil {
+		log.Errorf("Failed to load tracked tokens: %v", err)
+		os.Exit(1)
+	} else if len(extras) > 0 {
+		log.Infof("Tracking %d additional token(s): %v", len(extras), extras)
 	}
 
 	// -----------------------------------------------------------------------
@@ -171,6 +198,11 @@ func main() {
 		os.Exit(1)
 	}
 	log.Info("Historical sync complete")
+
+	// Pending history backfills run beside the live sync: pages are applied in
+	// batches that take the store's batch lock in turn with block processing,
+	// and balance deltas commute, so both writers converge on the same state.
+	go runBackfills(ctx, db, *restURL)
 
 	// -----------------------------------------------------------------------
 	// Balance reconciliation (optional, fixes VHP migration gap)
@@ -262,4 +294,165 @@ func runAPIOnly(dbPath, koinContract, vhpContract string, port int) {
 		}
 	}
 	log.Info("API-only: shutdown complete")
+}
+
+// registerTrackedTokens records new --track-token contracts: symbol and
+// decimals from the REST node, plus a backfill record whose cutoff is the
+// current sync height — live sync covers everything after it.
+func registerTrackedTokens(db *store.SQLiteStore, cfg *config.TokenTrackerConfig, restURL string, addrs []string) error {
+	for _, addr := range addrs {
+		addr = strings.TrimSpace(addr)
+		if addr == "" {
+			continue
+		}
+		if addr == cfg.KoinContract || addr == cfg.VhpContract {
+			log.Warnf("--track-token %s: KOIN/VHP are always tracked", addr)
+			continue
+		}
+		if len(addr) > 50 || !validBase58.MatchString(addr) {
+			return fmt.Errorf("--track-token %s: not a base58 address", addr)
+		}
+		if bf, err := db.GetBackfill(addr); err != nil {
+			return err
+		} else if bf != nil {
+			log.Infof("--track-token %s: already registered (backfill done=%v, next seq %d)", addr, bf.Done, bf.NextSeq)
+			continue
+		}
+		info, err := fetchTokenInfo(restURL, addr)
+		if err != nil {
+			return fmt.Errorf("--track-token %s: %w", addr, err)
+		}
+		head, _, err := db.GetSyncState()
+		if err != nil {
+			return err
+		}
+		if err := db.UpsertToken(addr, info.Symbol, info.Decimals, ""); err != nil {
+			return err
+		}
+		if err := db.UpsertBackfill(&store.Backfill{Token: addr, NextSeq: 0, CutoffHeight: head}); err != nil {
+			return err
+		}
+		log.Infof("--track-token %s: registered %s (%d decimals), history up to height %d will be backfilled", addr, info.Symbol, info.Decimals, head)
+	}
+	return nil
+}
+
+// loadExtraTokens makes every token in the database (except KOIN/VHP) a
+// tracked token for this run.
+func loadExtraTokens(db *store.SQLiteStore, cfg *config.TokenTrackerConfig) ([]string, error) {
+	tokens, err := db.GetAllTokens()
+	if err != nil {
+		return nil, err
+	}
+	var extras []string
+	for _, t := range tokens {
+		if t.Address != cfg.KoinContract && t.Address != cfg.VhpContract {
+			extras = append(extras, t.Address)
+		}
+	}
+	cfg.SetExtraTokens(extras)
+	return extras, nil
+}
+
+// runBackfills imports the history of every token whose backfill is not done
+// yet, one token at a time, then checks the result against the chain.
+func runBackfills(ctx context.Context, db *store.SQLiteStore, restURL string) {
+	pending, err := db.ListBackfills()
+	if err != nil {
+		log.Errorf("Backfill: %v", err)
+		return
+	}
+	for _, bf := range pending {
+		if bf.Done || ctx.Err() != nil {
+			continue
+		}
+		log.Infof("Backfill %s: starting at seq %d (cutoff height %d)", bf.Token, bf.NextSeq, bf.CutoffHeight)
+		res, err := backfill.Run(ctx, db, restURL, bf.Token)
+		if err != nil {
+			log.Errorf("Backfill %s: stopped at seq %d: %v (resumes on next start)", bf.Token, res.LastSeq, err)
+			continue
+		}
+		checked, corrected, err := reconcile.RunToken(db, restURL, bf.Token)
+		if err != nil {
+			log.Warnf("Backfill %s: reconcile failed: %v", bf.Token, err)
+			continue
+		}
+		log.Infof("Backfill %s: %d entries, %d events; reconcile checked %d holders, corrected %d", bf.Token, res.Entries, res.Ops, checked, corrected)
+	}
+}
+
+type tokenInfo struct {
+	Symbol   string `json:"symbol"`
+	Decimals int    `json:"decimals"`
+}
+
+func fetchTokenInfo(restURL, addr string) (*tokenInfo, error) {
+	client := &http.Client{Timeout: 15 * time.Second}
+	resp, err := client.Get(strings.TrimRight(restURL, "/") + "/v1/token/" + addr + "/info")
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("token info: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var info tokenInfo
+	if err := json.Unmarshal(body, &info); err != nil {
+		return nil, fmt.Errorf("token info: %w", err)
+	}
+	if info.Symbol == "" || info.Decimals < 0 || info.Decimals > 30 {
+		return nil, fmt.Errorf("token info: not a token (symbol %q, decimals %d)", info.Symbol, info.Decimals)
+	}
+	return &info, nil
+}
+
+// runBackfillDryRun replays a token's whole history in memory and compares
+// every resulting balance with the chain's balance_of. Exit code 0 when they
+// all match. Touches no database.
+func runBackfillDryRun(token, restURL string) int {
+	if len(token) > 50 || !validBase58.MatchString(token) {
+		fmt.Fprintln(os.Stderr, "not a base58 address")
+		return 2
+	}
+	info, err := fetchTokenInfo(restURL, token)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, err)
+		return 2
+	}
+	start := time.Now()
+	balances, res, err := backfill.DryRun(context.Background(), restURL, token, 0)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "dry run failed after %d entries: %v\n", res.Entries, err)
+		return 1
+	}
+	fmt.Printf("%s (%s): %d history entries, %d token events, %d holders, %s\n", token, info.Symbol, res.Entries, res.Ops, len(balances), time.Since(start).Round(time.Second))
+	client := &http.Client{Timeout: 15 * time.Second}
+	mismatches, checked := 0, 0
+	for addr, bal := range balances {
+		resp, err := client.Get(strings.TrimRight(restURL, "/") + "/v1/token/" + token + "/balance/" + addr)
+		if err != nil {
+			fmt.Printf("  %s: chain lookup failed: %v\n", addr, err)
+			continue
+		}
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+		resp.Body.Close()
+		var v struct {
+			Value string `json:"value"`
+		}
+		chain := "0"
+		if resp.StatusCode == http.StatusOK && json.Unmarshal(body, &v) == nil {
+			chain = reconcile.DecimalToSatoshis(v.Value, info.Decimals)
+		}
+		checked++
+		if chain != bal.String() {
+			mismatches++
+			fmt.Printf("  MISMATCH %s: computed %s, chain %s\n", addr, bal.String(), chain)
+		}
+	}
+	fmt.Printf("checked %d holders against the chain: %d mismatches\n", checked, mismatches)
+	if mismatches > 0 {
+		return 1
+	}
+	return 0
 }

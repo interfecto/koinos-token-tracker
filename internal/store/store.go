@@ -27,6 +27,11 @@ type Store interface {
 	GetToken(address string) (*Token, error)
 	GetAllTokens() ([]Token, error)
 
+	// Backfill progress of additionally tracked tokens (see internal/backfill)
+	GetBackfill(token string) (*Backfill, error) // nil when the token has no record
+	UpsertBackfill(b *Backfill) error
+	ListBackfills() ([]Backfill, error)
+
 	// Transfers
 	InsertTransfer(height uint64, txID, token, fromAddr, toAddr, value, eventType string, timestamp uint64) error
 	DeleteTransfersAtHeight(height uint64) error
@@ -80,6 +85,15 @@ type Token struct {
 	Symbol      string
 	Decimals    int
 	TotalSupply string
+}
+
+// Backfill is the progress record of importing a token's pre-tracking history.
+type Backfill struct {
+	Token        string `json:"token"`
+	NextSeq      uint64 `json:"next_seq"`      // next history sequence number to read
+	CutoffHeight uint64 `json:"cutoff_height"` // heights above this are covered by live sync
+	Done         bool   `json:"done"`
+	UpdatedAt    int64  `json:"updated_at"`
 }
 
 // Transfer represents a token transfer/mint/burn event.

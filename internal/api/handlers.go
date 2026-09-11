@@ -398,8 +398,34 @@ func (h *handlers) handleTokens(w http.ResponseWriter, r *http.Request) {
 		internalError(w, err)
 		return
 	}
+	backfills, err := h.store.ListBackfills()
+	if err != nil {
+		internalError(w, err)
+		return
+	}
+	byToken := make(map[string]store.Backfill, len(backfills))
+	for _, b := range backfills {
+		byToken[b.Token] = b
+	}
+	// Indexed = holders and transfers are complete: KOIN/VHP always, other
+	// tokens once their history backfill has finished.
+	type tokenOut struct {
+		store.Token
+		Indexed  bool            `json:"Indexed"`
+		Backfill *store.Backfill `json:"Backfill,omitempty"`
+	}
+	out := make([]tokenOut, 0, len(tokens))
+	for _, t := range tokens {
+		o := tokenOut{Token: t, Indexed: true}
+		if b, ok := byToken[t.Address]; ok {
+			bb := b
+			o.Backfill = &bb
+			o.Indexed = b.Done
+		}
+		out = append(out, o)
+	}
 
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"tokens": tokens,
+		"tokens": out,
 	})
 }
