@@ -238,6 +238,7 @@
     }
     .balance-koin { color: var(--accent-gold); }
     .balance-vhp { color: var(--accent-purple); }
+    .balance-token { color: var(--accent-teal, #2a9d8f); }
     .pct {
       font-size: 0.75rem;
       color: var(--text-muted);
@@ -578,6 +579,29 @@ function fmtBal(satoshis) {
   const n = Number(satoshis) / 1e8;
   return n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 }
+// Token metadata for transfer rows: the tracker can follow tokens besides
+// KOIN/VHP (--track-token), whose symbol and decimals come from /tokens.
+const TOKEN_META = new Map([[KOIN, { symbol: 'KOIN', decimals: 8 }], [VHP, { symbol: 'VHP', decimals: 8 }]]);
+let tokenMetaPromise = null;
+function loadTokenMeta() {
+  if (!tokenMetaPromise) {
+    tokenMetaPromise = fetch(`${API}/v1/token-tracker/tokens`).then(r => r.json()).then(d => {
+      (Array.isArray(d.tokens) ? d.tokens : []).forEach(t => {
+        if (!t || typeof t.Address !== 'string') return;
+        const sym = typeof t.Symbol === 'string' ? t.Symbol.replace(/[^A-Za-z0-9._-]/g, '').replace(/^[^A-Za-z0-9]+/, '').slice(0, 12) : '';
+        const dec = typeof t.Decimals === 'number' && Number.isInteger(t.Decimals) && t.Decimals >= 0 && t.Decimals <= 18 ? t.Decimals : undefined;
+        if (sym || dec !== undefined) TOKEN_META.set(t.Address, { symbol: sym || undefined, decimals: dec });
+      });
+    }).catch(() => { tokenMetaPromise = null; });
+  }
+  return tokenMetaPromise;
+}
+function tokenSymbol(addr) { const m = TOKEN_META.get(addr); return m && m.symbol ? m.symbol : shortAddr(addr); }
+function tokenDecimals(addr) { const m = TOKEN_META.get(addr); return m && m.decimals !== undefined ? m.decimals : 8; }
+function tokenClassOf(addr) { return addr === KOIN ? 'balance-koin' : addr === VHP ? 'balance-vhp' : 'balance-token'; }
+function fmtTokenAmount(addr, value) {
+  return (Number(value) / 10 ** tokenDecimals(addr)).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
 function shortAddr(a) {
   if (!a) return '';
   return a.length > 20 ? a.slice(0, 10) + '...' + a.slice(-8) : a;
@@ -662,9 +686,10 @@ async function loadTransfers(addr) {
     }
     document.querySelector('#tab-transfers .table-header h2').textContent = `Transfers (${fmt(data.total)} total)`;
     document.getElementById('csvExportBtn').style.display = 'inline-block';
+    await loadTokenMeta();
     data.transfers.forEach(t => {
-      const token = t.token === KOIN ? 'KOIN' : 'VHP';
-      const tokenClass = t.token === KOIN ? 'balance-koin' : 'balance-vhp';
+      const token = tokenSymbol(t.token);
+      const tokenClass = tokenClassOf(t.token);
       const typeClass = 'event-' + t.event_type;
       const tr = document.createElement('tr');
       tr.innerHTML = `
@@ -674,7 +699,7 @@ async function loadTransfers(addr) {
         <td class="${tokenClass}" style="font-weight:500">${token}</td>
         <td class="address" onclick="lookupAddr('${t.from}')" title="${t.from}">${t.from ? shortAddr(t.from) : '<span style="color:var(--text-muted)">mint</span>'}</td>
         <td class="address" onclick="lookupAddr('${t.to}')" title="${t.to}">${t.to ? shortAddr(t.to) : '<span style="color:var(--text-muted)">burn</span>'}</td>
-        <td class="balance ${tokenClass}">${fmtBal(t.value)}</td>
+        <td class="balance ${tokenClass}">${fmtTokenAmount(t.token, t.value)}</td>
       `;
       body.appendChild(tr);
     });
@@ -701,20 +726,23 @@ async function exportCSV() {
       if (data.transfers.length < pageSize) break;
     }
 
+    await loadTokenMeta();
     const rows = [['Block','Timestamp','Type','Token','From','To','Amount']];
     allTransfers.forEach(t => {
       rows.push([
         t.height,
         new Date(Number(t.timestamp)).toISOString(),
         t.event_type,
-        t.token === KOIN ? 'KOIN' : 'VHP',
+        tokenSymbol(t.token),
         t.from || '',
         t.to || '',
-        (Number(t.value) / 1e8).toFixed(8)
+        (Number(t.value) / 10 ** tokenDecimals(t.token)).toFixed(tokenDecimals(t.token))
       ]);
     });
 
-    const csv = rows.map(r => r.map(c => '"' + String(c).replace(/"/g, '""') + '"').join(',')).join('\n');
+    // spreadsheet formula protection: cells starting with = + - @ get a leading apostrophe
+    const cell = c => { const v = String(c); return '"' + (/^[=+\-@\t\r]/.test(v) ? "'" + v : v).replace(/"/g, '""') + '"'; };
+    const csv = rows.map(r => r.map(cell).join(',')).join('\n');
     const blob = new Blob([csv], { type: 'text/csv' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');

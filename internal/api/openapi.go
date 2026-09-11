@@ -167,8 +167,7 @@ const openAPISpec = `{
                         }
                       }
                     },
-                    "total_blocks": {"type": "integer", "description": "Total blocks produced in last 24h"},
-                    "height": {"type": "integer"}
+                    "total_blocks": {"type": "integer", "description": "Total blocks produced in last 24h"}
                   }
                 }
               }
