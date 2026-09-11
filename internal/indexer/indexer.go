@@ -233,6 +233,24 @@ func processEvent(cfg *config.TokenTrackerConfig, ev *protocol.EventData, txID s
 	}
 }
 
+// DecodeTransferEvent decodes a raw koinos.contracts.token.transfer_event payload.
+func DecodeTransferEvent(data []byte) (from, to string, value uint64) {
+	f, t, v := parseTransferEvent(data)
+	return encodeAddr(f), encodeAddr(t), v
+}
+
+// DecodeMintEvent decodes a raw koinos.contracts.token.mint_event payload.
+func DecodeMintEvent(data []byte) (to string, value uint64) {
+	t, v := parseMintEvent(data)
+	return encodeAddr(t), v
+}
+
+// DecodeBurnEvent decodes a raw koinos.contracts.token.burn_event payload.
+func DecodeBurnEvent(data []byte) (from string, value uint64) {
+	f, v := parseBurnEvent(data)
+	return encodeAddr(f), v
+}
+
 // parseTransferEvent decodes a transfer_event protobuf message:
 //
 //	field 1 (bytes): from address

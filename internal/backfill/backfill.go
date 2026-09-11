@@ -5,15 +5,23 @@
 // Source of truth is the Koinos account history of the contract (served by
 // koinos-rest from koinos-account-history), read in irreversible, ascending
 // order and resumable by sequence number. Balances are derived from the
-// decoded mint/transfer/burn events exactly like the live block processor
-// does. A transaction entry carries no block height, so the height and
-// timestamp are looked up through the transaction's containing block and
-// cached per block. Entries above the cutoff height are left to the live
-// sync, which has tracked the token since the cutoff.
+// mint/transfer/burn events exactly like the live block processor does,
+// decoding the protobuf payload ourselves when the node could not (no ABI).
+// A transaction entry carries no block height, so it is resolved through the
+// transaction's containing blocks, keeping only the one that is the canonical
+// block at its height, and cached. Entries above the cutoff height belong to
+// the live sync, which tracks the token from cutoff+1 on.
+//
+// The backfill must run to completion before any block above the cutoff is
+// processed: balances are clamped at zero, so a post-cutoff spend applied
+// before its pre-cutoff funding would be lost. main.go therefore runs pending
+// backfills before the historical sync.
 package backfill
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +36,7 @@ import (
 	"time"
 
 	log "github.com/koinos/koinos-log-golang/v2"
+	"github.com/koinos/koinos-token-tracker/internal/indexer"
 	"github.com/koinos/koinos-token-tracker/internal/store"
 )
 
@@ -71,7 +80,8 @@ type Client struct {
 	rest     string
 	fallback string
 	http     *http.Client
-	blocks   map[string]blockInfo
+	blocks   map[string]blockInfo // canonical block id → position
+	canon    map[uint64]string    // height → canonical block id
 }
 
 type blockInfo struct{ height, timestamp uint64 }
@@ -79,7 +89,10 @@ type blockInfo struct{ height, timestamp uint64 }
 // NewClient talks to a koinos-rest base URL such as http://127.0.0.1:3000;
 // fallbackURL (may be empty) is asked when the primary fails a lookup.
 func NewClient(restURL, fallbackURL string) *Client {
-	return &Client{rest: strings.TrimRight(restURL, "/"), fallback: strings.TrimRight(fallbackURL, "/"), http: &http.Client{Timeout: httpTimeout}, blocks: make(map[string]blockInfo)}
+	return &Client{
+		rest: strings.TrimRight(restURL, "/"), fallback: strings.TrimRight(fallbackURL, "/"),
+		http: &http.Client{Timeout: httpTimeout}, blocks: make(map[string]blockInfo), canon: make(map[uint64]string),
+	}
 }
 
 // --- wire shapes (only the fields we read) --------------------------------
@@ -108,7 +121,7 @@ type historyEntry struct {
 type event struct {
 	Source string          `json:"source"`
 	Name   string          `json:"name"`
-	Data   json.RawMessage `json:"data"`
+	Data   json.RawMessage `json:"data"` // decoded object, or a base64 string when the node had no ABI
 }
 
 type eventData struct {
@@ -122,6 +135,7 @@ type txResponse struct {
 }
 
 type blockResponse struct {
+	BlockID     string `json:"block_id"`
 	BlockHeight string `json:"block_height"`
 	Block       struct {
 		Header struct {
@@ -188,21 +202,32 @@ func (c *Client) getJSONFrom(ctx context.Context, base, path string, out interfa
 	return lastErr
 }
 
-// History returns one page of the contract's irreversible history, ascending from seq.
+// History returns one page of the contract's irreversible history, ascending
+// from seq. koinos-rest answers an empty history with {} rather than [].
 func (c *Client) History(ctx context.Context, token string, seq uint64, limit int) ([]historyEntry, error) {
 	q := url.Values{}
 	q.Set("limit", strconv.Itoa(limit))
 	q.Set("ascending", "true")
 	q.Set("irreversible", "true")
 	q.Set("sequence_number", strconv.FormatUint(seq, 10))
-	var page []historyEntry
-	if err := c.getJSON(ctx, "/v1/account/"+token+"/history?"+q.Encode(), &page); err != nil {
+	var raw json.RawMessage
+	if err := c.getJSON(ctx, "/v1/account/"+token+"/history?"+q.Encode(), &raw); err != nil {
 		return nil, err
+	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return nil, nil
+	}
+	var page []historyEntry
+	if err := json.Unmarshal(trimmed, &page); err != nil {
+		return nil, fmt.Errorf("history page: bad json: %w", err)
 	}
 	return page, nil
 }
 
-// blockOf resolves the height and timestamp of the block containing a transaction.
+// blockOf resolves the canonical block containing a transaction: of the
+// candidate blocks the transaction store knows, only the one that is the
+// block at its height on the main chain counts (the others are forks).
 func (c *Client) blockOf(ctx context.Context, txID string) (blockInfo, error) {
 	var tx txResponse
 	if err := c.getJSONOrFallback(ctx, "/v1/transaction/"+url.PathEscape(txID)+"?return_receipt=false", &tx); err != nil {
@@ -211,22 +236,43 @@ func (c *Client) blockOf(ctx context.Context, txID string) (blockInfo, error) {
 	if len(tx.ContainingBlocks) == 0 {
 		return blockInfo{}, fmt.Errorf("transaction %s: no containing block", txID)
 	}
-	id := tx.ContainingBlocks[0]
-	if b, ok := c.blocks[id]; ok {
+	var lastErr error
+	for _, id := range tx.ContainingBlocks {
+		if b, ok := c.blocks[id]; ok {
+			return b, nil
+		}
+		var br blockResponse
+		if err := c.getJSONOrFallback(ctx, "/v1/block/"+url.PathEscape(id), &br); err != nil {
+			lastErr = err
+			continue
+		}
+		h, err := strconv.ParseUint(br.BlockHeight, 10, 64)
+		if err != nil || h == 0 {
+			lastErr = fmt.Errorf("block %s: bad height %q", id, br.BlockHeight)
+			continue
+		}
+		canonID, ok := c.canon[h]
+		if !ok {
+			var atHeight blockResponse
+			if err := c.getJSONOrFallback(ctx, "/v1/block/"+strconv.FormatUint(h, 10), &atHeight); err != nil {
+				lastErr = err
+				continue
+			}
+			canonID = atHeight.BlockID
+			c.canon[h] = canonID
+		}
+		if !strings.EqualFold(canonID, id) {
+			continue // a fork block that also included the transaction
+		}
+		ts, _ := strconv.ParseUint(br.Block.Header.Timestamp, 10, 64)
+		b := blockInfo{height: h, timestamp: ts}
+		c.blocks[id] = b
 		return b, nil
 	}
-	var br blockResponse
-	if err := c.getJSONOrFallback(ctx, "/v1/block/"+url.PathEscape(id), &br); err != nil {
-		return blockInfo{}, err
+	if lastErr != nil {
+		return blockInfo{}, fmt.Errorf("transaction %s: %w", txID, lastErr)
 	}
-	h, err := strconv.ParseUint(br.BlockHeight, 10, 64)
-	if err != nil || h == 0 {
-		return blockInfo{}, fmt.Errorf("block %s: bad height %q", id, br.BlockHeight)
-	}
-	ts, _ := strconv.ParseUint(br.Block.Header.Timestamp, 10, 64)
-	b := blockInfo{height: h, timestamp: ts}
-	c.blocks[id] = b
-	return b, nil
+	return blockInfo{}, fmt.Errorf("transaction %s: none of its %d containing blocks is on the canonical chain", txID, len(tx.ContainingBlocks))
 }
 
 // --- history → ops ---------------------------------------------------------
@@ -251,8 +297,52 @@ func eventType(name string) string {
 	return ""
 }
 
-// opsOf extracts this token's balance-affecting events from one history entry.
-func opsOf(token string, seq uint64, b blockInfo, txID string, events []event) []Op {
+// decodeEvent returns from/to/value of a token event. The node decodes event
+// data when it knows the contract's ABI; otherwise data is the raw protobuf
+// payload as a base64 string, which we decode with the same parsers the live
+// block processor uses.
+func decodeEvent(typ string, data json.RawMessage) (from, to, value string, ok bool) {
+	trimmed := bytes.TrimSpace(data)
+	if len(trimmed) > 0 && trimmed[0] == '{' {
+		var d eventData
+		if err := json.Unmarshal(trimmed, &d); err != nil {
+			return "", "", "", false
+		}
+		return d.From, d.To, d.Value, true
+	}
+	var b64 string
+	if err := json.Unmarshal(trimmed, &b64); err != nil || b64 == "" {
+		return "", "", "", false
+	}
+	raw, err := base64.URLEncoding.DecodeString(padB64(b64))
+	if err != nil {
+		if raw, err = base64.StdEncoding.DecodeString(padB64(b64)); err != nil {
+			return "", "", "", false
+		}
+	}
+	switch typ {
+	case "transfer":
+		f, t, v := indexer.DecodeTransferEvent(raw)
+		return f, t, strconv.FormatUint(v, 10), true
+	case "mint":
+		t, v := indexer.DecodeMintEvent(raw)
+		return "", t, strconv.FormatUint(v, 10), true
+	case "burn":
+		f, v := indexer.DecodeBurnEvent(raw)
+		return f, "", strconv.FormatUint(v, 10), true
+	}
+	return "", "", "", false
+}
+
+func padB64(s string) string {
+	s = strings.TrimRight(s, "=")
+	return s + strings.Repeat("=", (4-len(s)%4)%4)
+}
+
+// opsOf extracts this token's balance-affecting events from one history
+// entry. An event of a recognised type that cannot be decoded is an error:
+// skipping it would silently corrupt balances.
+func opsOf(token string, seq uint64, b blockInfo, txID string, events []event) ([]Op, error) {
 	var ops []Op
 	for _, ev := range events {
 		if ev.Source != token {
@@ -262,20 +352,19 @@ func opsOf(token string, seq uint64, b blockInfo, txID string, events []event) [
 		if typ == "" {
 			continue
 		}
-		var d eventData
-		if err := json.Unmarshal(ev.Data, &d); err != nil {
-			continue
+		from, to, valueStr, ok := decodeEvent(typ, ev.Data)
+		if !ok {
+			return nil, fmt.Errorf("seq %d: cannot decode %s event of %s", seq, typ, token)
 		}
-		value, err := strconv.ParseUint(d.Value, 10, 64)
-		if err != nil || value == 0 || value > maxSafeValue {
-			continue
+		value, err := strconv.ParseUint(valueStr, 10, 64)
+		if err != nil || value > maxSafeValue {
+			return nil, fmt.Errorf("seq %d: %s event of %s has an unusable value %q", seq, typ, token, valueStr)
 		}
-		from, to := d.From, d.To
-		if from != "" && !validBase58.MatchString(from) {
-			continue
+		if value == 0 {
+			continue // no balance effect (the live processor skips these too)
 		}
-		if to != "" && !validBase58.MatchString(to) {
-			continue
+		if from != "" && !validBase58.MatchString(from) || to != "" && !validBase58.MatchString(to) {
+			return nil, fmt.Errorf("seq %d: %s event of %s has a malformed address", seq, typ, token)
 		}
 		switch typ {
 		case "transfer":
@@ -295,7 +384,7 @@ func opsOf(token string, seq uint64, b blockInfo, txID string, events []event) [
 		}
 		ops = append(ops, Op{Seq: seq, Height: b.height, Timestamp: b.timestamp, TxID: txID, EventType: typ, From: from, To: to, Value: value})
 	}
-	return ops
+	return ops, nil
 }
 
 // Page is one fetched, resolved page of history.
@@ -307,7 +396,8 @@ type Page struct {
 	End     bool   // history exhausted
 }
 
-// Collect fetches and resolves one page starting at seq.
+// Collect fetches and resolves one page starting at seq. Entries whose block
+// is above cutoff stop the page (cutoff math.MaxUint64 = no limit).
 func (c *Client) Collect(ctx context.Context, token string, seq uint64, cutoff uint64) (*Page, error) {
 	entries, err := c.History(ctx, token, seq, PageSize)
 	if err != nil {
@@ -331,7 +421,7 @@ func (c *Client) Collect(ctx context.Context, token string, seq uint64, cutoff u
 		case e.Trx != nil:
 			txID = e.Trx.Transaction.ID
 			if txID == "" {
-				continue
+				return nil, fmt.Errorf("seq %d: transaction entry without id", s)
 			}
 			b, err = c.blockOf(ctx, txID)
 			if err != nil {
@@ -341,11 +431,15 @@ func (c *Client) Collect(ctx context.Context, token string, seq uint64, cutoff u
 		default:
 			continue
 		}
-		if cutoff > 0 && b.height > cutoff {
+		if b.height > cutoff {
 			p.Stopped = b.height
 			return p, nil
 		}
-		p.Ops = append(p.Ops, opsOf(token, s, b, txID, events)...)
+		ops, err := opsOf(token, s, b, txID, events)
+		if err != nil {
+			return nil, err
+		}
+		p.Ops = append(p.Ops, ops...)
 		p.LastSeq = s
 	}
 	return p, nil
@@ -356,7 +450,8 @@ func (c *Client) Collect(ctx context.Context, token string, seq uint64, cutoff u
 // ErrNotRegistered means no backfill record exists for the token.
 var ErrNotRegistered = errors.New("token has no backfill record")
 
-// Run resumes (or starts) the backfill of one token and applies it to the store.
+// Run resumes (or starts) the backfill of one token and applies it to the
+// store, page by page, each page in one batch with its progress record.
 func Run(ctx context.Context, s store.Store, restURL, fallbackURL, token string) (*Result, error) {
 	bf, err := s.GetBackfill(token)
 	if err != nil {
@@ -385,19 +480,20 @@ func Run(ctx context.Context, s store.Store, restURL, fallbackURL, token string)
 		res.Ops += len(page.Ops)
 		done := page.End || page.Stopped > 0
 		next := seq
-		if page.Entries > 0 && page.Stopped == 0 {
+		if page.Entries > 0 && page.LastSeq >= seq {
 			next = page.LastSeq + 1
-		} else if page.Stopped > 0 {
-			next = page.LastSeq + 1 // entries before the stop point are applied; the rest belongs to live sync
 		}
-		if err := apply(s, token, page.Ops, &store.Backfill{Token: token, NextSeq: next, CutoffHeight: bf.CutoffHeight, Done: done}); err != nil {
+		progress := *bf
+		progress.NextSeq = next
+		progress.Done = done
+		if err := apply(s, token, page.Ops, &progress); err != nil {
 			return res, err
 		}
 		res.LastSeq = next
 		if done {
 			res.Done = true
 			res.StoppedAt = page.Stopped
-			log.Infof("Backfill %s: done — %d entries, %d events in %s", token, res.Entries, res.Ops, time.Since(started).Round(time.Second))
+			log.Infof("Backfill %s: replay done — %d entries, %d events in %s", token, res.Entries, res.Ops, time.Since(started).Round(time.Second))
 			return res, nil
 		}
 		seq = next
@@ -435,7 +531,7 @@ func apply(s store.Store, token string, ops []Op, progress *store.Backfill) erro
 	for _, op := range ops {
 		for _, a := range []string{op.From, op.To} {
 			if a != "" {
-				if err := s.UpsertAddress(a, op.Height, op.Timestamp); err != nil {
+				if err := s.LowerFirstSeen(a, op.Height, op.Timestamp); err != nil {
 					return fail(err)
 				}
 			}
@@ -469,8 +565,8 @@ func apply(s store.Store, token string, ops []Op, progress *store.Backfill) erro
 
 // DryRun replays the whole history without touching any database and returns
 // the balances it would produce, for checking against the chain before a
-// token is registered. cutoff 0 means "all of it".
-func DryRun(ctx context.Context, restURL, fallbackURL, token string, cutoff uint64) (map[string]*big.Int, *Result, error) {
+// token is registered.
+func DryRun(ctx context.Context, restURL, fallbackURL, token string) (map[string]*big.Int, *Result, error) {
 	c := NewClient(restURL, fallbackURL)
 	balances := make(map[string]*big.Int)
 	res := &Result{}
@@ -493,7 +589,7 @@ func DryRun(ctx context.Context, restURL, fallbackURL, token string, cutoff uint
 		if err := ctx.Err(); err != nil {
 			return balances, res, err
 		}
-		page, err := c.Collect(ctx, token, seq, cutoff)
+		page, err := c.Collect(ctx, token, seq, math.MaxUint64)
 		if err != nil {
 			return balances, res, err
 		}
@@ -510,9 +606,8 @@ func DryRun(ctx context.Context, restURL, fallbackURL, token string, cutoff uint
 				add(op.From, -int64(op.Value))
 			}
 		}
-		if page.End || page.Stopped > 0 {
+		if page.End {
 			res.Done = true
-			res.StoppedAt = page.Stopped
 			res.LastSeq = page.LastSeq
 			return balances, res, nil
 		}

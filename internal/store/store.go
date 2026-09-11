@@ -8,6 +8,7 @@ type Store interface {
 
 	// Addresses
 	UpsertAddress(address string, firstSeenHeight uint64, firstSeenTime uint64) error
+	LowerFirstSeen(address string, height uint64, timestamp uint64) error // insert, or move first-seen back
 	GetAddress(address string) (*Address, error)
 	GetAddresses(limit, offset int) ([]Address, int, error) // returns total count too
 
@@ -92,7 +93,10 @@ type Backfill struct {
 	Token        string `json:"token"`
 	NextSeq      uint64 `json:"next_seq"`      // next history sequence number to read
 	CutoffHeight uint64 `json:"cutoff_height"` // heights above this are covered by live sync
-	Done         bool   `json:"done"`
+	Done         bool   `json:"done"`          // replay finished
+	Verified     bool   `json:"verified"`      // every holder matched the chain afterwards
+	Mismatches   int    `json:"mismatches"`    // holders whose balance differed at the last check
+	Failures     int    `json:"failures"`      // holders the last check could not look up
 	UpdatedAt    int64  `json:"updated_at"`
 }
 

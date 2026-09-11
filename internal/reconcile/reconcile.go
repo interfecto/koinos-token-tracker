@@ -193,61 +193,6 @@ func Run(s store.Store, restURL string, vhpContract string) error {
 	return nil
 }
 
-// RunToken checks every known holder of one token against the REST node's
-// balance_of and overwrites the stored balance where they differ. It reports
-// how many holders were checked and corrected; used after a history backfill
-// to prove (and if needed repair) the event-derived balances.
-func RunToken(s store.Store, restURL, token string) (checked, corrected int, err error) {
-	client := &http.Client{Timeout: httpTimeout}
-	lastHeight, _, _ := s.GetSyncState()
-	var fixes []balanceUpdate
-	const page = 1000
-	for offset := 0; ; offset += page {
-		holders, _, err := s.GetTopHolders(token, page, offset)
-		if err != nil {
-			return checked, corrected, fmt.Errorf("holders: %w", err)
-		}
-		for _, h := range holders {
-			bal, ok := fetchBalanceWithRetry(client, restURL, h.Address, token)
-			if !ok {
-				continue
-			}
-			checked++
-			if bal != h.Balance {
-				fixes = append(fixes, balanceUpdate{Address: h.Address, Token: token, Balance: bal})
-			}
-		}
-		if len(holders) < page {
-			break
-		}
-	}
-	if len(fixes) == 0 {
-		return checked, 0, nil
-	}
-	if err := s.BeginBatch(); err != nil {
-		return checked, 0, err
-	}
-	for _, u := range fixes {
-		log.Warnf("Reconcile %s: %s stored %s, chain %s — correcting", token, u.Address, storedBalance(s, u.Address, token), u.Balance)
-		if err := s.SetBalance(u.Address, u.Token, u.Balance, lastHeight); err != nil {
-			s.RollbackBatch()
-			return checked, 0, fmt.Errorf("set balance for %s: %w", u.Address, err)
-		}
-	}
-	if err := s.CommitBatch(); err != nil {
-		return checked, 0, err
-	}
-	return checked, len(fixes), nil
-}
-
-func storedBalance(s store.Store, address, token string) string {
-	b, err := s.GetBalance(address, token)
-	if err != nil {
-		return "?"
-	}
-	return b
-}
-
 func fetchBalanceWithRetry(client *http.Client, restURL, address, contract string) (string, bool) {
 	for attempt := 0; attempt < maxRetries; attempt++ {
 		bal, status := fetchBalance(client, restURL, address, contract)
@@ -289,40 +234,6 @@ func fetchBalance(client *http.Client, restURL, address, contract string) (strin
 		return "", "error"
 	}
 	return sat, "ok"
-}
-
-// DecimalToSatoshis converts a decimal string from the REST node into base
-// units for a token with the given number of decimals ("1.5", 8 → "150000000").
-// Returns "" on malformed input.
-func DecimalToSatoshis(s string, decimals int) string {
-	if decimals == 8 {
-		return decimalToSatoshis(s)
-	}
-	if s == "" || strings.HasPrefix(s, "-") {
-		return ""
-	}
-	parts := strings.SplitN(s, ".", 2)
-	whole, frac := parts[0], ""
-	if len(parts) == 2 {
-		frac = parts[1]
-	}
-	if len(frac) > decimals {
-		if strings.Trim(frac[decimals:], "0") != "" {
-			return ""
-		}
-		frac = frac[:decimals]
-	}
-	frac += strings.Repeat("0", decimals-len(frac))
-	out := strings.TrimLeft(whole+frac, "0")
-	if out == "" {
-		return "0"
-	}
-	for _, c := range out {
-		if c < '0' || c > '9' {
-			return ""
-		}
-	}
-	return out
 }
 
 // decimalToSatoshis converts "147242.54875823" → "14724254875823".

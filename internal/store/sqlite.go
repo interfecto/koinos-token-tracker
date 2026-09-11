@@ -137,6 +137,23 @@ func (s *SQLiteStore) UpsertAddress(address string, firstSeenHeight uint64, firs
 	return nil
 }
 
+// LowerFirstSeen inserts the address or moves its first-seen position back
+// when the given one is earlier (a history backfill discovers activity that
+// predates what the live sync recorded).
+func (s *SQLiteStore) LowerFirstSeen(address string, height uint64, timestamp uint64) error {
+	_, err := s.exec().Exec(
+		`INSERT INTO addresses (address, first_seen_height, first_seen_time)
+		 VALUES (?, ?, ?)
+		 ON CONFLICT(address) DO UPDATE SET first_seen_height=excluded.first_seen_height, first_seen_time=excluded.first_seen_time
+		 WHERE excluded.first_seen_height < addresses.first_seen_height`,
+		address, height, timestamp,
+	)
+	if err != nil {
+		return fmt.Errorf("lower first seen: %w", err)
+	}
+	return nil
+}
+
 func (s *SQLiteStore) GetAddress(address string) (*Address, error) {
 	a := &Address{}
 	err := s.exec().QueryRow(
@@ -351,29 +368,42 @@ func (s *SQLiteStore) GetToken(address string) (*Token, error) {
 func (s *SQLiteStore) GetBackfill(token string) (*Backfill, error) {
 	b := &Backfill{}
 	var done int
+	var verified int
 	err := s.exec().QueryRow(
-		"SELECT token, next_seq, cutoff_height, done, updated_at FROM token_backfill WHERE token = ?", token,
-	).Scan(&b.Token, &b.NextSeq, &b.CutoffHeight, &done, &b.UpdatedAt)
-	if err == sql.ErrNoRows {
+		"SELECT token, next_seq, cutoff_height, done, verified, mismatches, failures, updated_at FROM token_backfill WHERE token = ?", token,
+	).Scan(&b.Token, &b.NextSeq, &b.CutoffHeight, &done, &verified, &b.Mismatches, &b.Failures, &b.UpdatedAt)
+	if err == sql.ErrNoRows || isNoSuchTable(err) {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, fmt.Errorf("get backfill: %w", err)
 	}
 	b.Done = done != 0
+	b.Verified = verified != 0
 	return b, nil
 }
 
+// isNoSuchTable is true when a query hit a database created by an older
+// build (--api-only never migrates, so it may read a schema without the
+// token_backfill table).
+func isNoSuchTable(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such table")
+}
+
 func (s *SQLiteStore) UpsertBackfill(b *Backfill) error {
-	done := 0
+	done, verified := 0, 0
 	if b.Done {
 		done = 1
 	}
+	if b.Verified {
+		verified = 1
+	}
 	_, err := s.exec().Exec(
-		`INSERT INTO token_backfill (token, next_seq, cutoff_height, done, updated_at)
-		 VALUES (?, ?, ?, ?, ?)
-		 ON CONFLICT(token) DO UPDATE SET next_seq=excluded.next_seq, cutoff_height=excluded.cutoff_height, done=excluded.done, updated_at=excluded.updated_at`,
-		b.Token, b.NextSeq, b.CutoffHeight, done, time.Now().Unix(),
+		`INSERT INTO token_backfill (token, next_seq, cutoff_height, done, verified, mismatches, failures, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(token) DO UPDATE SET next_seq=excluded.next_seq, cutoff_height=excluded.cutoff_height, done=excluded.done,
+		   verified=excluded.verified, mismatches=excluded.mismatches, failures=excluded.failures, updated_at=excluded.updated_at`,
+		b.Token, b.NextSeq, b.CutoffHeight, done, verified, b.Mismatches, b.Failures, time.Now().Unix(),
 	)
 	if err != nil {
 		return fmt.Errorf("upsert backfill: %w", err)
@@ -382,7 +412,10 @@ func (s *SQLiteStore) UpsertBackfill(b *Backfill) error {
 }
 
 func (s *SQLiteStore) ListBackfills() ([]Backfill, error) {
-	rows, err := s.exec().Query("SELECT token, next_seq, cutoff_height, done, updated_at FROM token_backfill ORDER BY token")
+	rows, err := s.exec().Query("SELECT token, next_seq, cutoff_height, done, verified, mismatches, failures, updated_at FROM token_backfill ORDER BY token")
+	if isNoSuchTable(err) {
+		return []Backfill{}, nil // older schema (read-only side instance): nothing registered
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list backfills: %w", err)
 	}
@@ -390,11 +423,12 @@ func (s *SQLiteStore) ListBackfills() ([]Backfill, error) {
 	out := make([]Backfill, 0)
 	for rows.Next() {
 		var b Backfill
-		var done int
-		if err := rows.Scan(&b.Token, &b.NextSeq, &b.CutoffHeight, &done, &b.UpdatedAt); err != nil {
+		var done, verified int
+		if err := rows.Scan(&b.Token, &b.NextSeq, &b.CutoffHeight, &done, &verified, &b.Mismatches, &b.Failures, &b.UpdatedAt); err != nil {
 			return nil, fmt.Errorf("scan backfill: %w", err)
 		}
 		b.Done = done != 0
+		b.Verified = verified != 0
 		out = append(out, b)
 	}
 	return out, rows.Err()
