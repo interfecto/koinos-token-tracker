@@ -372,6 +372,11 @@ func (s *SQLiteStore) GetBackfill(token string) (*Backfill, error) {
 	err := s.exec().QueryRow(
 		"SELECT token, next_seq, cutoff_height, done, verified, mismatches, failures, updated_at FROM token_backfill WHERE token = ?", token,
 	).Scan(&b.Token, &b.NextSeq, &b.CutoffHeight, &done, &verified, &b.Mismatches, &b.Failures, &b.UpdatedAt)
+	if isNoSuchColumn(err) { // first-build schema, read-only: no verification columns yet
+		err = s.exec().QueryRow(
+			"SELECT token, next_seq, cutoff_height, done, updated_at FROM token_backfill WHERE token = ?", token,
+		).Scan(&b.Token, &b.NextSeq, &b.CutoffHeight, &done, &b.UpdatedAt)
+	}
 	if err == sql.ErrNoRows || isNoSuchTable(err) {
 		return nil, nil
 	}
@@ -388,6 +393,13 @@ func (s *SQLiteStore) GetBackfill(token string) (*Backfill, error) {
 // token_backfill table).
 func isNoSuchTable(err error) bool {
 	return err != nil && strings.Contains(err.Error(), "no such table")
+}
+
+// isNoSuchColumn is true when a query hit a token_backfill table from the
+// first build of the feature (without the verification columns); a writable
+// instance migrates it, --api-only reads it with defaults.
+func isNoSuchColumn(err error) bool {
+	return err != nil && strings.Contains(err.Error(), "no such column")
 }
 
 func (s *SQLiteStore) UpsertBackfill(b *Backfill) error {
@@ -416,6 +428,11 @@ func (s *SQLiteStore) ListBackfills() ([]Backfill, error) {
 	if isNoSuchTable(err) {
 		return []Backfill{}, nil // older schema (read-only side instance): nothing registered
 	}
+	legacy := false
+	if isNoSuchColumn(err) { // first-build schema, read-only: verification columns default to zero
+		legacy = true
+		rows, err = s.exec().Query("SELECT token, next_seq, cutoff_height, done, updated_at FROM token_backfill ORDER BY token")
+	}
 	if err != nil {
 		return nil, fmt.Errorf("list backfills: %w", err)
 	}
@@ -424,7 +441,12 @@ func (s *SQLiteStore) ListBackfills() ([]Backfill, error) {
 	for rows.Next() {
 		var b Backfill
 		var done, verified int
-		if err := rows.Scan(&b.Token, &b.NextSeq, &b.CutoffHeight, &done, &verified, &b.Mismatches, &b.Failures, &b.UpdatedAt); err != nil {
+		if legacy {
+			err = rows.Scan(&b.Token, &b.NextSeq, &b.CutoffHeight, &done, &b.UpdatedAt)
+		} else {
+			err = rows.Scan(&b.Token, &b.NextSeq, &b.CutoffHeight, &done, &verified, &b.Mismatches, &b.Failures, &b.UpdatedAt)
+		}
+		if err != nil {
 			return nil, fmt.Errorf("scan backfill: %w", err)
 		}
 		b.Done = done != 0
@@ -565,11 +587,13 @@ func (s *SQLiteStore) GetTransfersByToken(token string, limit, offset int) ([]Tr
 }
 
 // GetRecentTransfers returns the latest transfers across all addresses,
-// newest first. Ordered by rowid, which follows chain insertion order.
+// newest first by chain height (a history backfill inserts old transfers with
+// new rowids, so rowid order alone would show them as recent), ties by
+// insertion order. Served by idx_transfers_height.
 func (s *SQLiteStore) GetRecentTransfers(limit int) ([]Transfer, error) {
 	rows, err := s.exec().Query(
 		`SELECT id, height, tx_id, token, from_addr, to_addr, value, event_type, timestamp
-		 FROM transfers ORDER BY id DESC LIMIT ?`, limit,
+		 FROM transfers ORDER BY height DESC, id DESC LIMIT ?`, limit,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("get recent transfers: %w", err)

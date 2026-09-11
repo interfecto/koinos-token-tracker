@@ -199,7 +199,7 @@ func main() {
 	// retrying every minute, because syncing past the cutoff with an
 	// incomplete replay would corrupt balances permanently.
 	for {
-		err := runBackfills(ctx, db, *restURL, *restFallback, *rpcURL)
+		err := runBackfills(ctx, db, *restURL, *restFallback, *rpcURL, cfg.KoinContract)
 		if err == nil {
 			break
 		}
@@ -392,8 +392,9 @@ func loadExtraTokens(db *store.SQLiteStore, cfg *config.TokenTrackerConfig) ([]s
 // yet, one token at a time, then checks every holder against the chain and
 // records the outcome. It returns an error as soon as one replay fails (the
 // caller must not sync past that token's cutoff); a failed verification is
-// only logged and retried on the next start.
-func runBackfills(ctx context.Context, db *store.SQLiteStore, restURL, fallbackURL, rpcURL string) error {
+// only logged and retried on the next start. ref is the reference account
+// (KOIN) whose history tells how far the history indexer has come.
+func runBackfills(ctx context.Context, db *store.SQLiteStore, restURL, fallbackURL, rpcURL, ref string) error {
 	pending, err := db.ListBackfills()
 	if err != nil {
 		return err
@@ -404,7 +405,7 @@ func runBackfills(ctx context.Context, db *store.SQLiteStore, restURL, fallbackU
 		}
 		if !bf.Done {
 			log.Infof("Backfill %s: replaying history from seq %d (cutoff height %d)", bf.Token, bf.NextSeq, bf.CutoffHeight)
-			res, err := backfill.Run(ctx, db, restURL, fallbackURL, bf.Token)
+			res, err := backfill.Run(ctx, db, restURL, fallbackURL, bf.Token, ref)
 			if err != nil {
 				return fmt.Errorf("%s: replay stopped at seq %d: %w", bf.Token, res.LastSeq, err)
 			}

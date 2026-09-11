@@ -135,10 +135,6 @@ type txResponse struct {
 	ContainingBlocks []string `json:"containing_blocks"`
 }
 
-type headInfo struct {
-	LastIrreversibleBlock string `json:"last_irreversible_block"`
-}
-
 type blockResponse struct {
 	BlockID     string `json:"block_id"`
 	BlockHeight string `json:"block_height"`
@@ -230,19 +226,47 @@ func (c *Client) History(ctx context.Context, token string, seq uint64, limit in
 	return page, nil
 }
 
-// LIB returns the primary node's last irreversible block height. The history
-// source (koinos-account-history) follows the same node, so a history that
-// ends before the LIB reached the cutoff is not finished, only lagging.
-func (c *Client) LIB(ctx context.Context) (uint64, error) {
-	var hi headInfo
-	if err := c.getJSON(ctx, "/v1/chain/head_info", &hi); err != nil {
+// HistoryHeight returns the irreversible height the history indexer
+// (koinos-account-history behind the primary node) has reached, read from
+// the newest irreversible entry of a reference account with activity in every
+// block — the KOIN contract, whose per-block mint is a block-level event. The
+// chain's own LIB says nothing about that separate indexer's progress.
+func (c *Client) HistoryHeight(ctx context.Context, ref string) (uint64, error) {
+	q := url.Values{}
+	q.Set("limit", "5")
+	q.Set("ascending", "false")
+	q.Set("irreversible", "true")
+	var raw json.RawMessage
+	if err := c.getJSON(ctx, "/v1/account/"+ref+"/history?"+q.Encode(), &raw); err != nil {
 		return 0, err
 	}
-	lib, err := strconv.ParseUint(hi.LastIrreversibleBlock, 10, 64)
-	if err != nil || lib == 0 {
-		return 0, fmt.Errorf("head_info: bad last_irreversible_block %q", hi.LastIrreversibleBlock)
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || trimmed[0] != '[' {
+		return 0, fmt.Errorf("reference account %s has no history", ref)
 	}
-	return lib, nil
+	var page []historyEntry
+	if err := json.Unmarshal(trimmed, &page); err != nil {
+		return 0, fmt.Errorf("reference history: bad json: %w", err)
+	}
+	for _, e := range page {
+		if e.Block != nil {
+			h, err := strconv.ParseUint(e.Block.Header.Height, 10, 64)
+			if err != nil || h == 0 {
+				return 0, fmt.Errorf("reference history: bad block height %q", e.Block.Header.Height)
+			}
+			return h, nil
+		}
+	}
+	for _, e := range page {
+		if e.Trx != nil && e.Trx.Transaction.ID != "" {
+			b, err := c.blockOf(ctx, e.Trx.Transaction.ID)
+			if err != nil {
+				return 0, err
+			}
+			return b.height, nil
+		}
+	}
+	return 0, fmt.Errorf("reference account %s has no usable history entry", ref)
 }
 
 // blockOf resolves the canonical block containing a transaction: of the
@@ -524,8 +548,10 @@ func (c *Client) Collect(ctx context.Context, token string, seq uint64, cutoff u
 var ErrNotRegistered = errors.New("token has no backfill record")
 
 // Run resumes (or starts) the backfill of one token and applies it to the
-// store, page by page, each page in one batch with its progress record.
-func Run(ctx context.Context, s store.Store, restURL, fallbackURL, token string) (*Result, error) {
+// store, page by page, each page in one batch with its progress record. ref
+// is the reference account whose history tells how far the history indexer
+// has come (see HistoryHeight).
+func Run(ctx context.Context, s store.Store, restURL, fallbackURL, token, ref string) (*Result, error) {
 	bf, err := s.GetBackfill(token)
 	if err != nil {
 		return nil, err
@@ -541,6 +567,7 @@ func Run(ctx context.Context, s store.Store, restURL, fallbackURL, token string)
 	c := NewClient(restURL, fallbackURL)
 	seq := bf.NextSeq
 	started := time.Now()
+	covered := false // the history indexer is known to have passed the cutoff
 	for {
 		if err := ctx.Err(); err != nil {
 			return res, err
@@ -555,20 +582,28 @@ func Run(ctx context.Context, s store.Store, restURL, fallbackURL, token string)
 		if page.Entries > 0 && page.LastSeq >= seq {
 			next = page.LastSeq + 1
 		}
-		// The end of history only counts once the node's irreversible height
-		// has reached the cutoff: a lagging history source would otherwise
-		// look exhausted while pre-cutoff events are still to come.
+		// An entry above the cutoff proves the history reaches past it. An
+		// exhausted history proves nothing by itself: the history indexer may
+		// simply not have got that far. It is complete only when the indexer
+		// is known to have passed the cutoff — and only for pages fetched
+		// after that was established, so entries indexed between a short
+		// page and the check cannot slip through. A lagging indexer leaves
+		// the record open with its cursor advanced; the caller retries.
 		done := page.Stopped > 0
 		var lagErr error
 		if page.End && !done {
-			lib, err := c.LIB(ctx)
-			switch {
-			case err != nil:
-				lagErr = fmt.Errorf("history exhausted but the node's irreversible height is unknown: %w", err)
-			case lib < bf.CutoffHeight:
-				lagErr = fmt.Errorf("history exhausted at LIB %d, below the cutoff %d: the history source is lagging, retry later", lib, bf.CutoffHeight)
-			default:
+			if covered {
 				done = true
+			} else {
+				h, err := c.HistoryHeight(ctx, ref)
+				switch {
+				case err != nil:
+					lagErr = fmt.Errorf("history exhausted but the history indexer's height is unknown: %w", err)
+				case h < bf.CutoffHeight:
+					lagErr = fmt.Errorf("history exhausted while the history indexer is at height %d, below the cutoff %d: retry later", h, bf.CutoffHeight)
+				default:
+					covered = true // re-read the tail before accepting it
+				}
 			}
 		}
 		progress := *bf

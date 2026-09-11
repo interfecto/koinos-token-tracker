@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -145,5 +146,67 @@ func TestMigrateAddsBackfillColumns(t *testing.T) {
 	b, err := s.GetBackfill("1TKNxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
 	if err != nil || b == nil || !b.Verified || b.Mismatches != 1 || b.Failures != 2 {
 		t.Fatalf("round trip %+v %v", b, err)
+	}
+}
+
+func TestReadOnlyReadsFirstBuildBackfillSchema(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ro.db")
+	s, err := Open(path, "1KNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "1VHPyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.UpsertBackfill(&Backfill{Token: "1TKNxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", NextSeq: 3, CutoffHeight: 9, Done: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, col := range []string{"verified", "mismatches", "failures"} {
+		if _, err := s.db.Exec("ALTER TABLE token_backfill DROP COLUMN " + col); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+	ro, err := OpenReadOnly(path, "1KNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "1VHPyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ro.Close()
+	list, err := ro.ListBackfills()
+	if err != nil || len(list) != 1 || !list[0].Done || list[0].Verified || list[0].NextSeq != 3 {
+		t.Fatalf("list on first-build schema: %+v %v", list, err)
+	}
+	b, err := ro.GetBackfill("1TKNxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	if err != nil || b == nil || !b.Done || b.Verified || b.CutoffHeight != 9 {
+		t.Fatalf("get on first-build schema: %+v %v", b, err)
+	}
+}
+
+func TestRecentTransfersOrderedByHeightNotRowid(t *testing.T) {
+	s, err := Open(filepath.Join(t.TempDir(), "r.db"), "1KNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "1VHPyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, h := range []uint64{200, 100} { // a backfill inserts the older transfer later
+		if err := s.InsertTransfer(h, "tx", "1TKNxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "a", "b", "1", "transfer", h*1000); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := s.GetRecentTransfers(1)
+	if err != nil || len(got) != 1 || got[0].Height != 200 {
+		t.Fatalf("recent = %+v %v, want the height-200 transfer", got, err)
+	}
+	rows, err := s.db.Query("EXPLAIN QUERY PLAN SELECT id FROM transfers ORDER BY height DESC, id DESC LIMIT 1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var id, parent, notused int
+		var detail string
+		if err := rows.Scan(&id, &parent, &notused, &detail); err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(detail, "TEMP B-TREE") {
+			t.Fatalf("recent transfers must be served by idx_transfers_height, not a sort: %s", detail)
+		}
 	}
 }

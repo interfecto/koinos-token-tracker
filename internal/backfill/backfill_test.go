@@ -59,21 +59,33 @@ type fakeREST struct {
 	pageLimit int
 	failAtSeq int // history page at this seq fails once with 400
 	emptyObj  bool
-	lib       uint64 // last irreversible block reported by head_info (0 = far ahead)
+	indexed   uint64 // height the fake history indexer has reached (0 = far ahead): entries above it are not served yet
+	afterHist func() // runs once after the first token-history page was served
 	calls     atomic.Int64
 	failed    atomic.Bool
+}
+
+// refAcct is the reference account whose newest irreversible history entry
+// reports the indexer height (the KOIN contract in production).
+const refAcct = "1KNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+
+func (f *fakeREST) height() uint64 {
+	if f.indexed == 0 {
+		return 1 << 40
+	}
+	return f.indexed
 }
 
 func (f *fakeREST) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f.calls.Add(1)
 		switch {
-		case r.URL.Path == "/v1/chain/head_info":
-			lib := f.lib
-			if lib == 0 {
-				lib = 1 << 40
+		case strings.HasPrefix(r.URL.Path, "/v1/account/"+refAcct+"/history"):
+			if r.URL.Query().Get("ascending") != "false" || r.URL.Query().Get("irreversible") != "true" {
+				http.Error(w, "bad params", 400)
+				return
 			}
-			json.NewEncoder(w).Encode(map[string]interface{}{"head_topology": map[string]string{"height": strconv.FormatUint(lib+60, 10)}, "last_irreversible_block": strconv.FormatUint(lib, 10)})
+			json.NewEncoder(w).Encode([]map[string]interface{}{{"seq_num": "77", "block": map[string]interface{}{"header": map[string]string{"height": strconv.FormatUint(f.height(), 10), "timestamp": "1700000000000"}, "receipt": map[string]interface{}{"events": []interface{}{}}}}})
 		case strings.HasPrefix(r.URL.Path, "/v1/account/"+tok+"/history"):
 			seq, _ := strconv.Atoi(r.URL.Query().Get("sequence_number"))
 			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -90,7 +102,7 @@ func (f *fakeREST) handler() http.HandlerFunc {
 			}
 			var out []map[string]interface{}
 			for _, e := range f.entries {
-				if e.seq < seq || len(out) >= limit {
+				if e.seq < seq || len(out) >= limit || e.height > f.height() {
 					continue
 				}
 				item := map[string]interface{}{}
@@ -106,9 +118,13 @@ func (f *fakeREST) handler() http.HandlerFunc {
 			}
 			if len(out) == 0 && f.emptyObj {
 				w.Write([]byte("{}")) // what koinos-rest actually sends for an empty history
-				return
+			} else {
+				json.NewEncoder(w).Encode(out)
 			}
-			json.NewEncoder(w).Encode(out)
+			if f.afterHist != nil {
+				f.afterHist()
+				f.afterHist = nil
+			}
 		case strings.HasPrefix(r.URL.Path, "/v1/transaction/"):
 			id := strings.TrimPrefix(r.URL.Path, "/v1/transaction/")
 			for _, e := range f.entries {
@@ -179,7 +195,7 @@ func TestRunAppliesHistoryUpToCutoff(t *testing.T) {
 	s := newStore(t)
 	register(t, s, 200)
 
-	res, err := Run(context.Background(), s, srv.URL, "", tok)
+	res, err := Run(context.Background(), s, srv.URL, "", tok, refAcct)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -208,7 +224,7 @@ func TestRunAppliesHistoryUpToCutoff(t *testing.T) {
 
 	// a second run is a no-op: nothing double-counted, no REST calls
 	before := f.calls.Load()
-	res, err = Run(context.Background(), s, srv.URL, "", tok)
+	res, err = Run(context.Background(), s, srv.URL, "", tok, refAcct)
 	if err != nil || !res.Done || f.calls.Load() != before {
 		t.Fatalf("second run: %+v err=%v calls=%d→%d", res, err, before, f.calls.Load())
 	}
@@ -221,7 +237,7 @@ func TestExactCutoffHeightIsIncluded(t *testing.T) {
 	srv := newServer(t, &fakeREST{entries: fixture(), pageLimit: 100})
 	s := newStore(t)
 	register(t, s, 105) // the two entries at 105 belong to the backfill, 110 to live sync
-	res, err := Run(context.Background(), s, srv.URL, "", tok)
+	res, err := Run(context.Background(), s, srv.URL, "", tok, refAcct)
 	if err != nil || !res.Done || res.Ops != 3 || res.StoppedAt != 110 {
 		t.Fatalf("result %+v %v", res, err)
 	}
@@ -236,7 +252,7 @@ func TestFreshDatabaseCutoffZeroBackfillsNothing(t *testing.T) {
 	srv := newServer(t, &fakeREST{entries: fixture(), pageLimit: 100})
 	s := newStore(t)
 	register(t, s, 0)
-	res, err := Run(context.Background(), s, srv.URL, "", tok)
+	res, err := Run(context.Background(), s, srv.URL, "", tok, refAcct)
 	if err != nil || !res.Done || res.Ops != 0 || res.StoppedAt != 100 {
 		t.Fatalf("result %+v %v", res, err)
 	}
@@ -253,7 +269,7 @@ func TestRunResumesAfterFailure(t *testing.T) {
 	srv := newServer(t, f)
 	s := newStore(t)
 	register(t, s, 1000)
-	if _, err := Run(context.Background(), s, srv.URL, "", tok); err == nil {
+	if _, err := Run(context.Background(), s, srv.URL, "", tok, refAcct); err == nil {
 		t.Fatal("expected the injected failure")
 	}
 	bf, _ := s.GetBackfill(tok)
@@ -263,7 +279,7 @@ func TestRunResumesAfterFailure(t *testing.T) {
 	if balance(t, s, alfa) != "70" || balance(t, s, beta) != "30" { // first page applied: mint 100, transfer 30
 		t.Fatalf("partial balances alfa=%s beta=%s", balance(t, s, alfa), balance(t, s, beta))
 	}
-	res, err := Run(context.Background(), s, srv.URL, "", tok)
+	res, err := Run(context.Background(), s, srv.URL, "", tok, refAcct)
 	if err != nil || !res.Done {
 		t.Fatalf("resume: %+v %v", res, err)
 	}
@@ -283,14 +299,14 @@ func TestEmptyHistoryObjectMeansNoEntries(t *testing.T) {
 	srv := newServer(t, &fakeREST{entries: fixture(), pageLimit: 5, emptyObj: true})
 	s := newStore(t)
 	register(t, s, 1000)
-	res, err := Run(context.Background(), s, srv.URL, "", tok)
+	res, err := Run(context.Background(), s, srv.URL, "", tok, refAcct)
 	if err != nil || !res.Done || res.Ops != 5 {
 		t.Fatalf("result %+v %v", res, err)
 	}
 	srv2 := newServer(t, &fakeREST{entries: nil, pageLimit: 100, emptyObj: true})
 	s2 := newStore(t)
 	register(t, s2, 1000)
-	if res, err := Run(context.Background(), s2, srv2.URL, "", tok); err != nil || !res.Done || res.Entries != 0 {
+	if res, err := Run(context.Background(), s2, srv2.URL, "", tok, refAcct); err != nil || !res.Done || res.Entries != 0 {
 		t.Fatalf("empty token: %+v %v", res, err)
 	}
 }
@@ -301,7 +317,7 @@ func TestForkBlockIsIgnored(t *testing.T) {
 	srv := newServer(t, &fakeREST{entries: entries, pageLimit: 100})
 	s := newStore(t)
 	register(t, s, 200)
-	res, err := Run(context.Background(), s, srv.URL, "", tok)
+	res, err := Run(context.Background(), s, srv.URL, "", tok, refAcct)
 	if err != nil || !res.Done || res.Ops != 4 {
 		t.Fatalf("result %+v %v", res, err)
 	}
@@ -324,7 +340,7 @@ func TestUndecodedEventsAreDecodedLocally(t *testing.T) {
 	srv := newServer(t, &fakeREST{entries: entries, pageLimit: 100})
 	s := newStore(t)
 	register(t, s, 200)
-	res, err := Run(context.Background(), s, srv.URL, "", tok)
+	res, err := Run(context.Background(), s, srv.URL, "", tok, refAcct)
 	if err != nil || !res.Done || res.Ops != 2 {
 		t.Fatalf("result %+v %v", res, err)
 	}
@@ -336,7 +352,7 @@ func TestUndecodedEventsAreDecodedLocally(t *testing.T) {
 	srv2 := newServer(t, &fakeREST{entries: bad, pageLimit: 100})
 	s2 := newStore(t)
 	register(t, s2, 200)
-	if _, err := Run(context.Background(), s2, srv2.URL, "", tok); err == nil {
+	if _, err := Run(context.Background(), s2, srv2.URL, "", tok, refAcct); err == nil {
 		t.Fatal("an undecodable token event must fail the run")
 	}
 }
@@ -356,7 +372,7 @@ func TestLowerFirstSeen(t *testing.T) {
 	}
 	srv := newServer(t, &fakeREST{entries: fixture(), pageLimit: 100})
 	register(t, s, 200)
-	if _, err := Run(context.Background(), s, srv.URL, "", tok); err != nil {
+	if _, err := Run(context.Background(), s, srv.URL, "", tok, refAcct); err != nil {
 		t.Fatal(err)
 	}
 	a, err := s.GetAddress(alfa)
@@ -373,7 +389,7 @@ func TestDryRunMatchesRun(t *testing.T) {
 	}
 	s := newStore(t)
 	register(t, s, 1000)
-	if _, err := Run(context.Background(), s, srv.URL, "", tok); err != nil {
+	if _, err := Run(context.Background(), s, srv.URL, "", tok, refAcct); err != nil {
 		t.Fatal(err)
 	}
 	for addr, want := range balances {
@@ -399,7 +415,7 @@ func TestFallbackNodeResolvesTransaction(t *testing.T) {
 	defer broken.Close()
 	s := newStore(t)
 	register(t, s, 1000)
-	res, err := Run(context.Background(), s, broken.URL, goodSrv.URL, tok)
+	res, err := Run(context.Background(), s, broken.URL, goodSrv.URL, tok, refAcct)
 	if err != nil || !res.Done || res.Ops != 5 {
 		t.Fatalf("run with fallback: %+v %v", res, err)
 	}
@@ -408,14 +424,14 @@ func TestFallbackNodeResolvesTransaction(t *testing.T) {
 	}
 	s2 := newStore(t)
 	register(t, s2, 1000)
-	if _, err := Run(context.Background(), s2, broken.URL, "", tok); err == nil {
+	if _, err := Run(context.Background(), s2, broken.URL, "", tok, refAcct); err == nil {
 		t.Fatal("expected failure without a fallback node")
 	}
 }
 
 func TestRunRequiresRegistration(t *testing.T) {
 	s := newStore(t)
-	if _, err := Run(context.Background(), s, "http://127.0.0.1:1", "", tok); err != ErrNotRegistered {
+	if _, err := Run(context.Background(), s, "http://127.0.0.1:1", "", tok, refAcct); err != ErrNotRegistered {
 		t.Fatalf("expected ErrNotRegistered, got %v", err)
 	}
 }
@@ -447,13 +463,13 @@ func TestOpsOfRejectsGarbage(t *testing.T) {
 }
 
 func TestLaggingHistoryIsNotDone(t *testing.T) {
-	// history ends (short page) but the node's LIB is still below the cutoff:
-	// apply what arrived, keep the cursor, but do not call the replay done
-	f := &fakeREST{entries: fixture()[:2], pageLimit: 100, lib: 150}
+	// history ends (short page) but the history indexer is still below the
+	// cutoff: apply what arrived, keep the cursor, do not call the replay done
+	f := &fakeREST{entries: fixture()[:2], pageLimit: 100, indexed: 150}
 	srv := newServer(t, f)
 	s := newStore(t)
 	register(t, s, 200)
-	res, err := Run(context.Background(), s, srv.URL, "", tok)
+	res, err := Run(context.Background(), s, srv.URL, "", tok, refAcct)
 	if err == nil || res.Done {
 		t.Fatalf("lagging history must not complete: %+v %v", res, err)
 	}
@@ -461,8 +477,8 @@ func TestLaggingHistoryIsNotDone(t *testing.T) {
 	if bf.Done || bf.NextSeq != 2 || balance(t, s, alfa) != "70" {
 		t.Fatalf("progress %+v alfa=%s", bf, balance(t, s, alfa))
 	}
-	f.lib = 250 // the node caught up
-	res, err = Run(context.Background(), s, srv.URL, "", tok)
+	f.indexed = 250 // the history indexer caught up
+	res, err = Run(context.Background(), s, srv.URL, "", tok, refAcct)
 	if err != nil || !res.Done {
 		t.Fatalf("after catch-up: %+v %v", res, err)
 	}
@@ -476,7 +492,7 @@ func TestMalformedProtobufStopsRun(t *testing.T) {
 	srv := newServer(t, &fakeREST{entries: bad, pageLimit: 100})
 	s := newStore(t)
 	register(t, s, 200)
-	if _, err := Run(context.Background(), s, srv.URL, "", tok); err == nil {
+	if _, err := Run(context.Background(), s, srv.URL, "", tok, refAcct); err == nil {
 		t.Fatal("malformed protobuf must fail the run instead of becoming a zero-value event")
 	}
 	if _, _, _, err := decodeRawTokenEvent("mint", []byte{0x0a, 0x05, 0x01}); err == nil {
@@ -503,7 +519,50 @@ func TestCanonicalLookupUsesPrimaryOnly(t *testing.T) {
 	defer primary.Close()
 	s := newStore(t)
 	register(t, s, 200)
-	if _, err := Run(context.Background(), s, primary.URL, good.URL, tok); err == nil {
+	if _, err := Run(context.Background(), s, primary.URL, good.URL, tok, refAcct); err == nil {
 		t.Fatal("canonical lookup must not be served by the fallback node")
+	}
+}
+
+func TestHistoryAppendedBetweenShortPageAndCoverageCheck(t *testing.T) {
+	// the indexer is at height 105 when the first (short) page is served, then
+	// jumps past the cutoff before the coverage check: the block-level mint
+	// @110 (seq 3) it indexed in between must still be replayed
+	f := &fakeREST{entries: fixture(), pageLimit: 100, indexed: 105}
+	f.afterHist = func() { f.indexed = 250 }
+	srv := newServer(t, f)
+	s := newStore(t)
+	register(t, s, 200)
+	res, err := Run(context.Background(), s, srv.URL, "", tok, refAcct)
+	if err != nil || !res.Done {
+		t.Fatalf("run: %+v %v", res, err)
+	}
+	if got := balance(t, s, beta); got != "25" {
+		t.Fatalf("beta = %s, want 25 (30 - 10 + 5: the mint indexed after the short page must be applied)", got)
+	}
+	if bf, _ := s.GetBackfill(tok); !bf.Done || bf.NextSeq != 4 {
+		t.Fatalf("progress %+v", bf)
+	}
+}
+
+func TestReferenceHistoryUnavailableIsNotDone(t *testing.T) {
+	// no reference history → the exhausted token history cannot be trusted
+	f := &fakeREST{entries: fixture()[:2], pageLimit: 100}
+	good := newServer(t, f)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/account/"+refAcct+"/history") {
+			w.Write([]byte("{}"))
+			return
+		}
+		http.Redirect(w, r, good.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	defer srv.Close()
+	s := newStore(t)
+	register(t, s, 200)
+	if res, err := Run(context.Background(), s, srv.URL, "", tok, refAcct); err == nil || res.Done {
+		t.Fatalf("must not complete without coverage evidence: %+v %v", res, err)
+	}
+	if bf, _ := s.GetBackfill(tok); bf.Done || bf.NextSeq != 2 {
+		t.Fatalf("progress %+v", bf)
 	}
 }
