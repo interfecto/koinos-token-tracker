@@ -71,3 +71,18 @@ func TestCheckTokenAgainstJSONRPC(t *testing.T) {
 		t.Fatalf("empty result: %v %v", v, err)
 	}
 }
+
+func TestZeroHoldersIsNotVerified(t *testing.T) {
+	r := &CheckResult{}
+	if r.Verified() {
+		t.Fatal("no holders checked must not count as verified")
+	}
+	r = &CheckResult{Checked: 1}
+	if !r.Verified() {
+		t.Fatal("one holder checked without findings is verified")
+	}
+	r = &CheckResult{Checked: 1, Failures: 1}
+	if r.Verified() {
+		t.Fatal("a failed lookup must not count as verified")
+	}
+}

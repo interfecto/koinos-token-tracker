@@ -195,8 +195,24 @@ func main() {
 	// Pending history backfills must finish before any block above their
 	// cutoff is processed (balances clamp at zero, so a later spend applied
 	// before its earlier funding would be lost). The API keeps serving
-	// meanwhile; block sync waits.
-	runBackfills(ctx, db, *restURL, *restFallback, *rpcURL)
+	// meanwhile; block sync waits — and keeps waiting while a replay fails,
+	// retrying every minute, because syncing past the cutoff with an
+	// incomplete replay would corrupt balances permanently.
+	for {
+		err := runBackfills(ctx, db, *restURL, *restFallback, *rpcURL)
+		if err == nil {
+			break
+		}
+		if ctx.Err() != nil {
+			return
+		}
+		log.Errorf("Backfill incomplete: %v — block sync stays paused, retrying in 60s", err)
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(60 * time.Second):
+		}
+	}
 
 	log.Info("Starting historical sync...")
 	if err := syncer.SyncToHead(ctx); err != nil {
@@ -374,24 +390,23 @@ func loadExtraTokens(db *store.SQLiteStore, cfg *config.TokenTrackerConfig) ([]s
 
 // runBackfills replays the history of every token whose backfill is not done
 // yet, one token at a time, then checks every holder against the chain and
-// records the outcome. It blocks until all pending work is done or failed;
-// a failed replay resumes on the next start.
-func runBackfills(ctx context.Context, db *store.SQLiteStore, restURL, fallbackURL, rpcURL string) {
+// records the outcome. It returns an error as soon as one replay fails (the
+// caller must not sync past that token's cutoff); a failed verification is
+// only logged and retried on the next start.
+func runBackfills(ctx context.Context, db *store.SQLiteStore, restURL, fallbackURL, rpcURL string) error {
 	pending, err := db.ListBackfills()
 	if err != nil {
-		log.Errorf("Backfill: %v", err)
-		return
+		return err
 	}
 	for _, bf := range pending {
-		if ctx.Err() != nil {
-			return
+		if err := ctx.Err(); err != nil {
+			return err
 		}
 		if !bf.Done {
 			log.Infof("Backfill %s: replaying history from seq %d (cutoff height %d)", bf.Token, bf.NextSeq, bf.CutoffHeight)
 			res, err := backfill.Run(ctx, db, restURL, fallbackURL, bf.Token)
 			if err != nil {
-				log.Errorf("Backfill %s: stopped at seq %d: %v (resumes on next start)", bf.Token, res.LastSeq, err)
-				continue
+				return fmt.Errorf("%s: replay stopped at seq %d: %w", bf.Token, res.LastSeq, err)
 			}
 			bf.Done = true
 		}
@@ -400,6 +415,7 @@ func runBackfills(ctx context.Context, db *store.SQLiteStore, restURL, fallbackU
 		}
 		verifyBackfill(ctx, db, rpcURL, bf.Token)
 	}
+	return nil
 }
 
 // verifyBackfill compares the token's holders with the chain and stores the

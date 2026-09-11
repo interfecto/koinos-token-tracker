@@ -72,6 +72,44 @@ INSERT OR IGNORE INTO sync_state (id, last_height, last_block_id, updated_at) VA
 `
 
 func migrate(db *sql.DB) error {
-	_, err := db.Exec(schema)
-	return err
+	if _, err := db.Exec(schema); err != nil {
+		return err
+	}
+	// Columns added after a table first shipped: CREATE TABLE IF NOT EXISTS
+	// leaves an existing table untouched, so add them explicitly.
+	return ensureColumns(db, "token_backfill", [][2]string{
+		{"verified", "INTEGER NOT NULL DEFAULT 0"},
+		{"mismatches", "INTEGER NOT NULL DEFAULT 0"},
+		{"failures", "INTEGER NOT NULL DEFAULT 0"},
+	})
+}
+
+// ensureColumns adds the listed columns to table when they are missing.
+func ensureColumns(db *sql.DB, table string, cols [][2]string) error {
+	rows, err := db.Query("PRAGMA table_info(" + table + ")")
+	if err != nil {
+		return err
+	}
+	have := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notnull, pk int
+		var dflt sql.NullString
+		if err := rows.Scan(&cid, &name, &typ, &notnull, &dflt, &pk); err != nil {
+			rows.Close()
+			return err
+		}
+		have[name] = true
+	}
+	rows.Close()
+	for _, c := range cols {
+		if have[c[0]] {
+			continue
+		}
+		if _, err := db.Exec("ALTER TABLE " + table + " ADD COLUMN " + c[0] + " " + c[1]); err != nil {
+			return err
+		}
+	}
+	return nil
 }

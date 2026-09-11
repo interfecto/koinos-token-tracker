@@ -120,3 +120,30 @@ func TestOpenReadOnly(t *testing.T) {
 		t.Fatal("missing database must not be created by the read-only opener")
 	}
 }
+
+func TestMigrateAddsBackfillColumns(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "m.db")
+	s, err := Open(path, "1KNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "1VHPyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// simulate a database created by the first build of the feature
+	for _, col := range []string{"verified", "mismatches", "failures"} {
+		if _, err := s.db.Exec("ALTER TABLE token_backfill DROP COLUMN " + col); err != nil {
+			t.Fatal(err)
+		}
+	}
+	s.Close()
+	s, err = Open(path, "1KNxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", "1VHPyyyyyyyyyyyyyyyyyyyyyyyyyyyyy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if err := s.UpsertBackfill(&Backfill{Token: "1TKNxxxxxxxxxxxxxxxxxxxxxxxxxxxxx", NextSeq: 3, CutoffHeight: 9, Done: true, Verified: true, Mismatches: 1, Failures: 2}); err != nil {
+		t.Fatalf("columns not migrated: %v", err)
+	}
+	b, err := s.GetBackfill("1TKNxxxxxxxxxxxxxxxxxxxxxxxxxxxxx")
+	if err != nil || b == nil || !b.Verified || b.Mismatches != 1 || b.Failures != 2 {
+		t.Fatalf("round trip %+v %v", b, err)
+	}
+}

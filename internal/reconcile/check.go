@@ -28,8 +28,10 @@ type CheckResult struct {
 	Details    []string // first mismatches, human readable
 }
 
-// Verified is true when every holder was answered and none differed.
-func (r *CheckResult) Verified() bool { return r.Failures == 0 && r.Mismatches == 0 }
+// Verified is true when at least one holder was checked, every lookup was
+// answered and none differed. Zero holders proves nothing (a token whose
+// history has not been indexed yet looks exactly like that).
+func (r *CheckResult) Verified() bool { return r.Checked > 0 && r.Failures == 0 && r.Mismatches == 0 }
 
 // CheckToken compares every stored non-zero holder of one token with the
 // chain's balance_of, read through JSON-RPC chain.read_contract so that a

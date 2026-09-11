@@ -36,8 +36,9 @@ import (
 	"time"
 
 	log "github.com/koinos/koinos-log-golang/v2"
-	"github.com/koinos/koinos-token-tracker/internal/indexer"
 	"github.com/koinos/koinos-token-tracker/internal/store"
+	"github.com/mr-tron/base58"
+	"google.golang.org/protobuf/encoding/protowire"
 )
 
 // PageSize is the history page size; the end of history is detected by a
@@ -134,6 +135,10 @@ type txResponse struct {
 	ContainingBlocks []string `json:"containing_blocks"`
 }
 
+type headInfo struct {
+	LastIrreversibleBlock string `json:"last_irreversible_block"`
+}
+
 type blockResponse struct {
 	BlockID     string `json:"block_id"`
 	BlockHeight string `json:"block_height"`
@@ -225,9 +230,26 @@ func (c *Client) History(ctx context.Context, token string, seq uint64, limit in
 	return page, nil
 }
 
+// LIB returns the primary node's last irreversible block height. The history
+// source (koinos-account-history) follows the same node, so a history that
+// ends before the LIB reached the cutoff is not finished, only lagging.
+func (c *Client) LIB(ctx context.Context) (uint64, error) {
+	var hi headInfo
+	if err := c.getJSON(ctx, "/v1/chain/head_info", &hi); err != nil {
+		return 0, err
+	}
+	lib, err := strconv.ParseUint(hi.LastIrreversibleBlock, 10, 64)
+	if err != nil || lib == 0 {
+		return 0, fmt.Errorf("head_info: bad last_irreversible_block %q", hi.LastIrreversibleBlock)
+	}
+	return lib, nil
+}
+
 // blockOf resolves the canonical block containing a transaction: of the
 // candidate blocks the transaction store knows, only the one that is the
-// block at its height on the main chain counts (the others are forks).
+// block at its height on the main chain counts (the others are forks). The
+// canonical lookup is always answered by the primary node, which is also the
+// history source, so heights are anchored to one chain view.
 func (c *Client) blockOf(ctx context.Context, txID string) (blockInfo, error) {
 	var tx txResponse
 	if err := c.getJSONOrFallback(ctx, "/v1/transaction/"+url.PathEscape(txID)+"?return_receipt=false", &tx); err != nil {
@@ -254,7 +276,7 @@ func (c *Client) blockOf(ctx context.Context, txID string) (blockInfo, error) {
 		canonID, ok := c.canon[h]
 		if !ok {
 			var atHeight blockResponse
-			if err := c.getJSONOrFallback(ctx, "/v1/block/"+strconv.FormatUint(h, 10), &atHeight); err != nil {
+			if err := c.getJSON(ctx, "/v1/block/"+strconv.FormatUint(h, 10), &atHeight); err != nil {
 				lastErr = err
 				continue
 			}
@@ -299,8 +321,8 @@ func eventType(name string) string {
 
 // decodeEvent returns from/to/value of a token event. The node decodes event
 // data when it knows the contract's ABI; otherwise data is the raw protobuf
-// payload as a base64 string, which we decode with the same parsers the live
-// block processor uses.
+// payload as a base64 string, which is decoded strictly here: malformed
+// bytes are an error, never a zero-value event.
 func decodeEvent(typ string, data json.RawMessage) (from, to, value string, ok bool) {
 	trimmed := bytes.TrimSpace(data)
 	if len(trimmed) > 0 && trimmed[0] == '{' {
@@ -320,18 +342,69 @@ func decodeEvent(typ string, data json.RawMessage) (from, to, value string, ok b
 			return "", "", "", false
 		}
 	}
+	f, t, v, err := decodeRawTokenEvent(typ, raw)
+	if err != nil {
+		return "", "", "", false
+	}
+	return f, t, strconv.FormatUint(v, 10), true
+}
+
+// decodeRawTokenEvent parses the KCS token event payloads
+// (transfer_event{bytes from=1; bytes to=2; uint64 value=3},
+// mint_event{bytes to=1; uint64 value=2}, burn_event{bytes from=1; uint64 value=2})
+// and rejects anything that is not well-formed protobuf.
+func decodeRawTokenEvent(typ string, raw []byte) (from, to string, value uint64, err error) {
+	var addrs [3][]byte
+	var nums [4]uint64
+	b := raw
+	for len(b) > 0 {
+		num, wt, n := protowire.ConsumeTag(b)
+		if n < 0 {
+			return "", "", 0, fmt.Errorf("bad protobuf tag")
+		}
+		b = b[n:]
+		switch wt {
+		case protowire.BytesType:
+			v, n := protowire.ConsumeBytes(b)
+			if n < 0 {
+				return "", "", 0, fmt.Errorf("bad bytes field %d", num)
+			}
+			if num >= 1 && num <= 2 {
+				addrs[num] = v
+			}
+			b = b[n:]
+		case protowire.VarintType:
+			v, n := protowire.ConsumeVarint(b)
+			if n < 0 {
+				return "", "", 0, fmt.Errorf("bad varint field %d", num)
+			}
+			if num >= 1 && num <= 3 {
+				nums[num] = v
+			}
+			b = b[n:]
+		default:
+			n := protowire.ConsumeFieldValue(num, wt, b)
+			if n < 0 {
+				return "", "", 0, fmt.Errorf("bad field %d", num)
+			}
+			b = b[n:]
+		}
+	}
+	enc := func(x []byte) string {
+		if len(x) == 0 {
+			return ""
+		}
+		return base58.Encode(x)
+	}
 	switch typ {
 	case "transfer":
-		f, t, v := indexer.DecodeTransferEvent(raw)
-		return f, t, strconv.FormatUint(v, 10), true
+		return enc(addrs[1]), enc(addrs[2]), nums[3], nil
 	case "mint":
-		t, v := indexer.DecodeMintEvent(raw)
-		return "", t, strconv.FormatUint(v, 10), true
+		return "", enc(addrs[1]), nums[2], nil
 	case "burn":
-		f, v := indexer.DecodeBurnEvent(raw)
-		return f, "", strconv.FormatUint(v, 10), true
+		return enc(addrs[1]), "", nums[2], nil
 	}
-	return "", "", "", false
+	return "", "", 0, fmt.Errorf("unknown event type %q", typ)
 }
 
 func padB64(s string) string {
@@ -478,10 +551,25 @@ func Run(ctx context.Context, s store.Store, restURL, fallbackURL, token string)
 		}
 		res.Entries += page.Entries
 		res.Ops += len(page.Ops)
-		done := page.End || page.Stopped > 0
 		next := seq
 		if page.Entries > 0 && page.LastSeq >= seq {
 			next = page.LastSeq + 1
+		}
+		// The end of history only counts once the node's irreversible height
+		// has reached the cutoff: a lagging history source would otherwise
+		// look exhausted while pre-cutoff events are still to come.
+		done := page.Stopped > 0
+		var lagErr error
+		if page.End && !done {
+			lib, err := c.LIB(ctx)
+			switch {
+			case err != nil:
+				lagErr = fmt.Errorf("history exhausted but the node's irreversible height is unknown: %w", err)
+			case lib < bf.CutoffHeight:
+				lagErr = fmt.Errorf("history exhausted at LIB %d, below the cutoff %d: the history source is lagging, retry later", lib, bf.CutoffHeight)
+			default:
+				done = true
+			}
 		}
 		progress := *bf
 		progress.NextSeq = next
@@ -490,6 +578,9 @@ func Run(ctx context.Context, s store.Store, restURL, fallbackURL, token string)
 			return res, err
 		}
 		res.LastSeq = next
+		if lagErr != nil {
+			return res, lagErr
+		}
 		if done {
 			res.Done = true
 			res.StoppedAt = page.Stopped
@@ -606,9 +697,11 @@ func DryRun(ctx context.Context, restURL, fallbackURL, token string) (map[string
 				add(op.From, -int64(op.Value))
 			}
 		}
+		if page.Entries > 0 {
+			res.LastSeq = page.LastSeq + 1 // next cursor, like Run
+		}
 		if page.End {
 			res.Done = true
-			res.LastSeq = page.LastSeq
 			return balances, res, nil
 		}
 		seq = page.LastSeq + 1

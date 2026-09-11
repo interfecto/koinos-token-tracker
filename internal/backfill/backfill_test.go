@@ -59,6 +59,7 @@ type fakeREST struct {
 	pageLimit int
 	failAtSeq int // history page at this seq fails once with 400
 	emptyObj  bool
+	lib       uint64 // last irreversible block reported by head_info (0 = far ahead)
 	calls     atomic.Int64
 	failed    atomic.Bool
 }
@@ -67,6 +68,12 @@ func (f *fakeREST) handler() http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		f.calls.Add(1)
 		switch {
+		case r.URL.Path == "/v1/chain/head_info":
+			lib := f.lib
+			if lib == 0 {
+				lib = 1 << 40
+			}
+			json.NewEncoder(w).Encode(map[string]interface{}{"head_topology": map[string]string{"height": strconv.FormatUint(lib+60, 10)}, "last_irreversible_block": strconv.FormatUint(lib, 10)})
 		case strings.HasPrefix(r.URL.Path, "/v1/account/"+tok+"/history"):
 			seq, _ := strconv.Atoi(r.URL.Query().Get("sequence_number"))
 			limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
@@ -436,5 +443,67 @@ func TestOpsOfRejectsGarbage(t *testing.T) {
 		if _, err := opsOf(tok, 1, b, "0x1220", bad); err == nil {
 			t.Fatalf("garbage must be an error, not skipped: %+v", bad)
 		}
+	}
+}
+
+func TestLaggingHistoryIsNotDone(t *testing.T) {
+	// history ends (short page) but the node's LIB is still below the cutoff:
+	// apply what arrived, keep the cursor, but do not call the replay done
+	f := &fakeREST{entries: fixture()[:2], pageLimit: 100, lib: 150}
+	srv := newServer(t, f)
+	s := newStore(t)
+	register(t, s, 200)
+	res, err := Run(context.Background(), s, srv.URL, "", tok)
+	if err == nil || res.Done {
+		t.Fatalf("lagging history must not complete: %+v %v", res, err)
+	}
+	bf, _ := s.GetBackfill(tok)
+	if bf.Done || bf.NextSeq != 2 || balance(t, s, alfa) != "70" {
+		t.Fatalf("progress %+v alfa=%s", bf, balance(t, s, alfa))
+	}
+	f.lib = 250 // the node caught up
+	res, err = Run(context.Background(), s, srv.URL, "", tok)
+	if err != nil || !res.Done {
+		t.Fatalf("after catch-up: %+v %v", res, err)
+	}
+	if bf, _ = s.GetBackfill(tok); !bf.Done || balance(t, s, alfa) != "70" {
+		t.Fatalf("no double counting on resume: %+v alfa=%s", bf, balance(t, s, alfa))
+	}
+}
+
+func TestMalformedProtobufStopsRun(t *testing.T) {
+	bad := []fixEntry{{0, 100, false, nil, []map[string]interface{}{ev(tok, "koinos.contracts.token.mint_event", base64.URLEncoding.EncodeToString([]byte{0xff}))}}}
+	srv := newServer(t, &fakeREST{entries: bad, pageLimit: 100})
+	s := newStore(t)
+	register(t, s, 200)
+	if _, err := Run(context.Background(), s, srv.URL, "", tok); err == nil {
+		t.Fatal("malformed protobuf must fail the run instead of becoming a zero-value event")
+	}
+	if _, _, _, err := decodeRawTokenEvent("mint", []byte{0x0a, 0x05, 0x01}); err == nil {
+		t.Fatal("truncated bytes field must be rejected")
+	}
+	f, to, v, err := decodeRawTokenEvent("transfer", protowire.AppendVarint(protowire.AppendTag(
+		protowire.AppendBytes(protowire.AppendTag(protowire.AppendBytes(protowire.AppendTag(nil, 1, protowire.BytesType), mustDecode(alfa)), 2, protowire.BytesType), mustDecode(beta)), 3, protowire.VarintType), 42))
+	if err != nil || f != alfa || to != beta || v != 42 {
+		t.Fatalf("decode transfer: %s %s %d %v", f, to, v, err)
+	}
+}
+
+func TestCanonicalLookupUsesPrimaryOnly(t *testing.T) {
+	// the fallback must never answer the block-at-height question: if the
+	// primary cannot, the run stops (resumable) instead of trusting another chain view
+	good := newServer(t, &fakeREST{entries: fixture(), pageLimit: 100})
+	primary := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if strings.HasPrefix(r.URL.Path, "/v1/block/") && !strings.HasPrefix(strings.TrimPrefix(r.URL.Path, "/v1/block/"), "0x") {
+			http.Error(w, `{"error":"unknown error"}`, 500) // block-by-height unavailable
+			return
+		}
+		http.Redirect(w, r, good.URL+r.URL.RequestURI(), http.StatusTemporaryRedirect)
+	}))
+	defer primary.Close()
+	s := newStore(t)
+	register(t, s, 200)
+	if _, err := Run(context.Background(), s, primary.URL, good.URL, tok); err == nil {
+		t.Fatal("canonical lookup must not be served by the fallback node")
 	}
 }
